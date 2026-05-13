@@ -1,0 +1,46 @@
+# ══════════════════════════════════════════
+# Mission 配置示例
+# 启动前填写，加载后只读不可修改（约束①）
+# ══════════════════════════════════════════
+
+mission:
+  goal: "获取内网核心数据库服务器权限"
+
+  # 授权范围 CIDR（严格限制，越界自动拒绝）
+  scope:
+    - "10.0.0.0/24"
+    - "192.168.1.0/24"
+
+  # 明确禁止的目标（Out of Bounds）
+  oob:
+    - "10.0.0.1"      # 网关，禁止触碰
+    - "10.0.0.254"    # 管理主机
+
+  # 风险等级 1-5（影响 Human 审批阈值）
+  risk_level: 3
+
+  # 授权的操作类型
+  approved_ops:
+    - "port_scan"
+    - "vulnerability_scan"
+    - "exploitation"
+    - "privilege_escalation"
+    - "lateral_movement"
+
+  # 并发连接上限（影响 Executor 配额）
+  max_noise: 30
+
+  # Planner Context 预算（token 数）
+  context_budget: 8000
+
+  # Payload 最大重试次数
+  max_payload_retry: 3
+
+  # stall_count 达到此值触发 Human 审批
+  human_approve_threshold: 4
+
+  # 任务截止时间（Unix timestamp，0表示无限制）
+  deadline: 0
+
+  # 最大连续无进展次数（触发 CLEANUP）
+  max_stall_count: 10

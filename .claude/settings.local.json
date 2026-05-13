@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(pip install *)",
+      "Bash(pip3 install *)",
+      "Bash(python3 -m pip show anthropic)",
+      "Read(//Users/GLA3/miniconda3/bin/**)",
+      "Read(//Users/GLA3/anaconda3/bin/**)",
+      "Read(//opt/**)",
+      "Bash(/opt/anaconda3/bin/python3.12 -m pip show anthropic)",
+      "Bash(/opt/anaconda3/bin/python3.12 -c ' *)"
+    ]
+  }
+}

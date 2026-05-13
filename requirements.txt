@@ -1,0 +1,37 @@
+# Agentic Pentest Framework — 依赖列表
+# 原则：最小依赖，不引入 LangChain/LangGraph 等重框架
+
+# LLM
+anthropic>=0.40.0
+
+# 存储
+redis[hiredis]>=5.0.0
+neo4j>=5.0.0
+clickhouse-driver>=0.2.7
+
+# 异步
+aiohttp>=3.9.0
+
+# API 层
+fastapi>=0.110.0
+uvicorn>=0.29.0
+pydantic>=2.0.0
+
+# 工具调用
+docker>=7.0.0          # 外部/内部沙箱管理
+python-nmap>=0.7.1     # Nmap 封装
+paramiko>=3.4.0        # SSH 执行
+asyncssh>=2.14.0       # 异步 SSH（LotL 执行）
+pywinrm>=0.4.3         # WinRM 远程执行
+pymetasploit3>=1.0.3   # Metasploit RPC 客户端
+
+# 记忆层
+chromadb>=0.4.0        # 向量数据库（RAG）
+
+# 配置
+pyyaml>=6.0.1          # mission.yaml 加载
+python-dotenv>=1.0.0   # .env 文件加载
+
+# 测试
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
