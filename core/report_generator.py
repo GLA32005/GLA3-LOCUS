@@ -340,7 +340,7 @@ class ReportGenerator:
             for i, f in enumerate(findings, 1):
                 lines.append(
                     f"| {i} | {f.get('target', '')} | {f.get('type', '')} "
-                    f"| {f.get('info_gain', 0):.2f} | {f.get('ts', '')} |"
+                    f"| {float(f.get('info_gain') or 0):.2f} | {f.get('ts', '')} |"
                 )
             lines.append("")
 

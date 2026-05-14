@@ -31,6 +31,9 @@ import signal
 import sys
 import yaml
 
+# 防止 HuggingFace tokenizer fork 死锁警告
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 # Load .env before any os.environ reads (no-op if file absent)
 try:
     from dotenv import load_dotenv
@@ -332,30 +335,12 @@ async def main():
         await uvicorn_server.serve()
 
     async def _print_progress_loop():
-        """每 15 秒打印一次进度摘要"""
-        import time
-        last_count = 0
+        """空循环（进度已由 orchestrator._print_progress 输出）"""
         while not shutdown_event.is_set():
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=15)
-                break  # event was set
+                await asyncio.wait_for(shutdown_event.wait(), timeout=30)
+                break
             except asyncio.TimeoutError:
-                pass  # 15s elapsed, print progress
-            try:
-                total = await state_api.count_hosts()
-                owned = await state_api.count_owned_hosts()
-                pending_payloads = await state_api.count_pending_payloads()
-                running_recon = await state_api.count_running_recon()
-                if total != last_count or owned > 0:
-                    bar_len = min(owned, 20)
-                    bar = "█" * bar_len + "░" * (20 - bar_len)
-                    logger.info(
-                        f"[PROGRESS] hosts={total} owned={owned} "
-                        f"recon_running={running_recon} pending_payloads={pending_payloads} "
-                        f"|{bar}|"
-                    )
-                    last_count = total
-            except Exception:
                 pass
 
     try:

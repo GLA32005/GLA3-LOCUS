@@ -157,7 +157,7 @@ class Planner:
         lines.append(f"  成功: {vs.get('success_count', 0)} | "
                      f"失败: {vs.get('fail_count', 0)} | "
                      f"拦截: {vs.get('blocked_count', 0)}")
-        lines.append(f"  平均信息增益: {vs.get('avg_info_gain', 0):.2f}")
+        lines.append(f"  平均信息增益: {float(vs.get('avg_info_gain') or 0):.2f}")
         lines.append(f"  幻觉次数: {vs.get('hallucination_count', 0)}")
         lines.append(f"  **建议**: {vs.get('recommendation', 'EXPLORE')}\n")
 
@@ -193,7 +193,7 @@ class Planner:
             lines.append(f"**相关知识**:")
             for k in view["knowledge"]:
                 lines.append(
-                    f"  [{k.get('relevance', 0):.2f}] "
+                    f"  [{float(k.get('relevance') or 0):.2f}] "
                     f"{k.get('source')}: {k.get('summary', '')[:100]}"
                 )
             lines.append("")

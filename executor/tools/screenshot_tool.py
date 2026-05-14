@@ -17,7 +17,7 @@ from . import BaseTool, ToolResult
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT = 30  # 秒
+_DEFAULT_TIMEOUT = 8  # 秒（内网页面不需要 30s）
 
 
 class ScreenshotTool(BaseTool):
@@ -42,7 +42,7 @@ class ScreenshotTool(BaseTool):
             )
 
         url = self._normalize_url(target, params)
-        wait_ms = int(params.get("wait_ms", 3000))
+        wait_ms = int(params.get("wait_ms", 1500))
         timeout = int(params.get("timeout_s", _DEFAULT_TIMEOUT))
 
         logger.info(f"ScreenshotTool: capturing {url}")
@@ -56,7 +56,8 @@ class ScreenshotTool(BaseTool):
                 )
                 try:
                     page = await browser.new_page(
-                        viewport={"width": 1280, "height": 900}
+                        viewport={"width": 1280, "height": 900},
+                        ignore_https_errors=True,  # 内网自签名证书
                     )
                     response = await asyncio.wait_for(
                         page.goto(url, wait_until="domcontentloaded"),

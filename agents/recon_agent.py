@@ -226,10 +226,8 @@ class ReconAgent(BaseAgent):
             f"tokens={tokens_used}"
         )
 
-        # ── 视觉直觉：自动为 HTTP 服务注入截图任务 ──────────────
-        await self._maybe_inject_screenshot_tasks(
-            view, mutations, existing_keys, input.agent_id
-        )
+        # 注：截图/nuclei 任务由 Executor._auto_dispatch_http_tasks 自动注入
+        # 不在此处重复注入，避免截图循环
 
         return NodeOutput(
             mutations=mutations,
@@ -298,7 +296,7 @@ class ReconAgent(BaseAgent):
         lines.append(f"**焦点目标**: {active_target or '未设置（需要初始侦察）'}")
         lines.append(f"**当前阶段**: {f.get('current_goal', 'RECON')}")
         lines.append(f"**当前假设**: {f.get('hypothesis', '暂无')}")
-        lines.append(f"**置信度**: {f.get('confidence', 0.0):.2f}")
+        lines.append(f"**置信度**: {float(f.get('confidence') or 0):.2f}")
         lines.append(f"**连续无进展**: {f.get('stall_count', 0)} 次\n")
 
         # Planner 下达的具体指令（来自 trigger_event.payload）
@@ -344,7 +342,7 @@ class ReconAgent(BaseAgent):
             for h in subnet_summary[:5]:
                 lines.append(
                     f"  {h.get('ip')} access={h.get('access_level', 'NONE')} "
-                    f"confidence={h.get('confidence', 0):.2f}"
+                    f"confidence={float(h.get('confidence') or 0):.2f}"
                 )
             lines.append("")
 
@@ -355,7 +353,7 @@ class ReconAgent(BaseAgent):
             lines.append(f"**已执行侦察**: {total} 次")
             lines.append(f"  成功: {vs.get('success_count', 0)} | "
                          f"失败: {vs.get('fail_count', 0)} | "
-                         f"均衡信息增益: {vs.get('avg_info_gain', 0):.2f}")
+                         f"均衡信息增益: {float(vs.get('avg_info_gain') or 0):.2f}")
             recent = vs.get("recent_types", [])
             if recent:
                 lines.append(f"  最近使用工具: {recent}")
@@ -378,7 +376,7 @@ class ReconAgent(BaseAgent):
             lines.append("**相关知识**:")
             for k in view["knowledge"]:
                 lines.append(
-                    f"  [{k.get('relevance', 0):.2f}] "
+                    f"  [{float(k.get('relevance') or 0):.2f}] "
                     f"{k.get('source')}: {k.get('summary', '')[:120]}"
                 )
             lines.append("")

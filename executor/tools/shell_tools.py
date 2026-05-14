@@ -34,7 +34,7 @@ class BannerGrabTool(BaseTool):
         parts = target.split(":")
         ip = parts[0]
         port = parts[1] if len(parts) > 1 else params.get("port", "80")
-        timeout = int(params.get("timeout_s", 10))
+        timeout = int(params.get("timeout_s", 3))
 
         # 优先用 ncat，其次 nc
         nc = check_binary("ncat") or check_binary("nc")

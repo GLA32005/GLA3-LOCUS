@@ -64,12 +64,31 @@ class RAGEngine:
     def _init_chroma(self):
         try:
             import chromadb
+
+            # 禁用 tokenizer 并行，避免 fork 后死锁
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+            # 显式指定嵌入函数，避免运行时隐式下载
+            ef = None
+            try:
+                from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+                ef = ONNXMiniLM_L6_V2()
+                # 预热：首次调用触发模型加载（如未缓存则现在下载，而非任务中途）
+                logger.info("RAGEngine: 预热嵌入模型...")
+                _ = ef(["warmup"])
+                logger.info("RAGEngine: 嵌入模型就绪")
+            except Exception as e:
+                logger.warning(f"RAGEngine: 嵌入模型加载失败 ({e})，将使用 ChromaDB 默认")
+                ef = None
+
             client = chromadb.PersistentClient(path=_CHROMA_PATH)
-            # 惰性创建集合（首次访问时创建）
-            collection = client.get_or_create_collection(
-                name=_COLLECTION_NAME,
-                metadata={"hnsw:space": "cosine"},
-            )
+            kwargs = {
+                "name": _COLLECTION_NAME,
+                "metadata": {"hnsw:space": "cosine"},
+            }
+            if ef:
+                kwargs["embedding_function"] = ef
+            collection = client.get_or_create_collection(**kwargs)
             return collection
         except ImportError:
             logger.warning("RAGEngine: chromadb not installed — pip install chromadb")
@@ -141,48 +160,55 @@ class RAGEngine:
         self, query_text: str, top_k: int,
         type_filter: Optional[str] = None,
     ) -> list[RetrievalResult]:
-        try:
-            import asyncio
-            loop = asyncio.get_event_loop()
+        import asyncio as _aio
 
-            where = None
-            if type_filter:
-                where = {"source": {"$eq": type_filter.lower() + "_db"
-                                    if type_filter in ("CVE", "LotL")
-                                    else type_filter.lower()}}
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                loop = _aio.get_event_loop()
 
-            kwargs = dict(
-                query_texts=[query_text],
-                n_results=min(top_k, self._chroma.count() or 1),
-                include=["documents", "metadatas", "distances"],
-            )
-            if where:
-                kwargs["where"] = where
-            results = await loop.run_in_executor(
-                None,
-                lambda: self._chroma.query(**kwargs),
-            )
+                where = None
+                if type_filter:
+                    where = {"source": {"$eq": type_filter.lower() + "_db"
+                                        if type_filter in ("CVE", "LotL")
+                                        else type_filter.lower()}}
 
-            items = []
-            docs      = results.get("documents", [[]])[0]
-            metas     = results.get("metadatas", [[]])[0]
-            distances = results.get("distances", [[]])[0]
+                kwargs = dict(
+                    query_texts=[query_text],
+                    n_results=min(top_k, self._chroma.count() or 1),
+                    include=["documents", "metadatas", "distances"],
+                )
+                if where:
+                    kwargs["where"] = where
+                results = await loop.run_in_executor(
+                    None,
+                    lambda: self._chroma.query(**kwargs),
+                )
 
-            for doc, meta, dist in zip(docs, metas, distances):
-                # ChromaDB cosine distance [0,2] → similarity [0,1]
-                relevance = max(0.0, 1.0 - dist / 2.0)
-                items.append(RetrievalResult(
-                    content=doc,
-                    source=meta.get("source", "unknown"),
-                    relevance=relevance,
-                    metadata=meta,
-                ))
+                items = []
+                docs      = results.get("documents", [[]])[0]
+                metas     = results.get("metadatas", [[]])[0]
+                distances = results.get("distances", [[]])[0]
 
-            return sorted(items, key=lambda x: x.relevance, reverse=True)
+                for doc, meta, dist in zip(docs, metas, distances):
+                    # ChromaDB cosine distance [0,2] → similarity [0,1]
+                    relevance = max(0.0, 1.0 - dist / 2.0)
+                    items.append(RetrievalResult(
+                        content=doc,
+                        source=meta.get("source", "unknown"),
+                        relevance=relevance,
+                        metadata=meta,
+                    ))
 
-        except Exception as e:
-            logger.error(f"RAGEngine ChromaDB query error: {e}")
-            return self._keyword_fallback(query_text, top_k)
+                return sorted(items, key=lambda x: x.relevance, reverse=True)
+
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(f"RAGEngine ChromaDB query retry {attempt+1}/{max_retries}: {e}")
+                    await _aio.sleep(0.5 * (attempt + 1))
+                else:
+                    logger.error(f"RAGEngine ChromaDB query failed after {max_retries} retries: {e}")
+                    return self._keyword_fallback(query_text, top_k)
 
     def _keyword_fallback(
         self, query_text: str, top_k: int,
@@ -429,5 +455,61 @@ _BUILTIN_KNOWLEDGE: list[dict] = [
         "metadata": {"technique": "vuln_chain", "category": "privilege_escalation",
                      "chain": "low_shell+kernel_exploit"},
     },
+    # ── IoT/路由器/光猫 默认凭据 ────────────────────────────
+    {
+        "content": (
+            "ZTE 光猫默认凭据: "
+            "ZXHN F7610M0 / F660 / F670L: "
+            "Web 管理口 admin/admin 或 telecomadmin/nE7jA%5m 或 user/user。"
+            "Telnet 端口 23: root/Zte521 或 root/root。"
+            "超级管理员密码常见于: http://<IP>/hidden_config.html 或 /usr.html。"
+            "利用路径: 发现 23/80 端口 → 尝试默认凭据 → 获取 Telnet/Web 管理权限。"
+        ),
+        "source": "methodology",
+        "metadata": {"technique": "default_creds", "category": "initial_access",
+                     "device": "zte_ont"},
+    },
+    {
+        "content": (
+            "Huawei 光猫/路由器默认凭据: "
+            "HG8245H / HG8546M: "
+            "Web: telecomadmin/admintelecom 或 root/admin。"
+            "Telnet: root/admin 或 root/adminHW。"
+            "华为 ONT 配置页面: http://<IP>/html/ssmp/index.asp。"
+            "利用路径: 扫描发现 Huawei banner → 尝试默认凭据 → 获取管理权限。"
+        ),
+        "source": "methodology",
+        "metadata": {"technique": "default_creds", "category": "initial_access",
+                     "device": "huawei_ont"},
+    },
+    {
+        "content": (
+            "通用路由器/IoT 默认凭据字典: "
+            "admin/admin, admin/password, admin/1234, admin/12345, "
+            "root/root, root/admin, root/password, root/toor, "
+            "user/user, guest/guest, support/support, "
+            "cisco/cisco, ubnt/ubnt, pi/raspberry。"
+            "工具: hydra -l admin -P /path/to/wordlist <IP> http-post-form / telnet / ssh。"
+            "优先级: 发现 IoT/路由器/嵌入式设备后，第一步尝试默认凭据。"
+        ),
+        "source": "methodology",
+        "metadata": {"technique": "default_creds", "category": "initial_access",
+                     "device": "generic_iot"},
+    },
+    {
+        "content": (
+            "路由器/光猫渗透方法论: "
+            "1. 指纹识别: Nmap -sV / banner_grab 确认设备型号。"
+            "2. 默认凭据: 根据型号查询默认账密（见 default_creds 条目）。"
+            "3. Web 管理: 访问 80/8080 端口，尝试默认凭据登录。"
+            "4. Telnet/SSH: 尝试 23/22 端口默认账密登录。"
+            "5. 已知漏洞: routersploit 框架自动化利用路由器漏洞。"
+            "6. 配置导出: 登录后导出 /etc/config 获取 WiFi 密码、PPPoE 凭据。"
+        ),
+        "source": "methodology",
+        "metadata": {"technique": "iot_methodology", "category": "initial_access",
+                     "device": "generic_router"},
+    },
 ]
+
 

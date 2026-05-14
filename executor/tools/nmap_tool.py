@@ -55,6 +55,14 @@ class NmapTool(BaseTool):
                     f"NmapTool: 忽略非法端口参数 '{extra_ports}'，使用默认端口范围"
                 )
 
+        # 内网加速：LAN 环境下提高扫描速率
+        try:
+            import ipaddress as _ipa
+            if _ipa.ip_address(ip).is_private:
+                args += ["--min-rate", "1000"]
+        except ValueError:
+            pass
+
         cmd = ["nmap", "-oX", "-"] + args + [ip]
         logger.info(f"NmapTool: {' '.join(cmd)}")
 

@@ -189,7 +189,7 @@ class Orchestrator:
                 return
 
             # 绝对保护：运行时间上限
-            max_runtime = mission.get("max_runtime_seconds", 3600)
+            max_runtime = mission.get("max_runtime_seconds", 7200)
             elapsed = time.time() - self._start_time
             if elapsed >= max_runtime:
                 logger.warning(
@@ -313,7 +313,7 @@ class Orchestrator:
                     merged["stall_count"] = old_stall
                 
                 # 如果置信度没有显著提升 (>= 0.15)，则视为本轮思考无进展，计数加 1
-                conf_diff = merged.get("confidence", 0) - current_focus.get("confidence", 0)
+                conf_diff = float(merged.get("confidence") or 0) - float(current_focus.get("confidence") or 0)
                 if conf_diff < 0.15 and not goal_changed:
                     merged["stall_count"] = old_stall + 1
                     self._total_stall_count += 1
@@ -326,9 +326,9 @@ class Orchestrator:
                 ))
                 logger.info(
                     f"Focus updated: goal={merged.get('current_goal')} "
-                    f"target={merged.get('active_target')} "
-                    f"conf={merged.get('confidence', 0):.2f} "
-                    f"stall={merged.get('stall_count')}"
+                    f"target={merged.get('active_target', 'None')} "
+                    f"conf={float(merged.get('confidence') or 0):.2f} "
+                    f"stall={merged.get('stall_count', 0)}"
                 )
             except Exception as e:
                 logger.error(f"Focus 同步失败: {e}")
@@ -401,7 +401,16 @@ class Orchestrator:
     async def _handle_task_completed(self, event: Event):
         """异步任务完成，标记已处理，触发 Planner 重评估"""
         task_id = event.payload.get("task_id")
-        logger.info(f"异步任务完成: {task_id}")
+        result = event.payload.get("result", {})
+        tool = result.get("tool", "?")
+        target = result.get("target", "?")
+        assets_found = result.get("assets_found", 0)
+        duration = result.get("duration_ms", 0)
+        raw_summary = result.get("raw_summary", "")[:100]
+        logger.info(
+            f"[DONE] Tool: {tool} | Target: {target} | "
+            f"Assets: {assets_found} | {duration}ms | {raw_summary}"
+        )
 
         # 标记任务已处理
         mutation = StateMutation(
@@ -750,7 +759,7 @@ class Orchestrator:
     # ── 进度统计 ──────────────────────────────────────────────
 
     async def _print_progress(self):
-        """每轮 Think 后打印进度摘要"""
+        """每轮 Think 后打印进度摘要（多维度进度条）"""
         try:
             total_hosts = await self.state_api.count_hosts()
             owned_hosts = await self.state_api.count_owned_hosts()
@@ -763,18 +772,50 @@ class Orchestrator:
             total_vec = vectors.get("total", 0)
             success_vec = vectors.get("success_count", 0)
 
-            bar_owned = "█" * min(owned_hosts, 20) + "░" * (20 - min(owned_hosts, 20))
+            # ── 计算多维度进度百分比 ──
+            # 维度 1: 资产发现（已发现主机 / scope 预估主机数）权重 30%
+            mission = await self.state_api.get_mission()
+            scope = mission.get("scope", [])
+            scope_size = 0
+            import ipaddress
+            for cidr in scope:
+                try:
+                    scope_size += ipaddress.ip_network(cidr, strict=False).num_addresses
+                except ValueError:
+                    scope_size += 1
+            scope_size = max(scope_size - 2, 1)  # 减去网络地址和广播地址
+            discovery_pct = min(total_hosts / scope_size, 1.0)
+
+            # 维度 2: 侦察深度（已完成的侦察任务 / 已派出的任务）权重 40%
+            total_tasks = max(recon_keys, 1)
+            done_tasks = max(total_tasks - pending_recon, 0)
+            recon_pct = done_tasks / total_tasks
+
+            # 维度 3: 利用成功率（已攻破主机 / 发现主机）权重 30%
+            exploit_pct = (owned_hosts / max(total_hosts, 1))
+
+            # 加权总进度
+            overall = discovery_pct * 0.3 + recon_pct * 0.4 + exploit_pct * 0.3
+            bar_len = 20
+            filled = int(overall * bar_len)
+            bar = "█" * filled + "░" * (bar_len - filled)
+
+            # 阶段标签
+            goal = focus.get("current_goal", "RECON") if isinstance(focus, dict) else "RECON"
+            stall = focus.get("stall_count", 0) if isinstance(focus, dict) else 0
+            max_stall = mission.get("max_stall_count", 10)
+            conf = float(focus.get("confidence") or 0) if isinstance(focus, dict) else 0
+            target = focus.get("active_target", "?") if isinstance(focus, dict) else "?"
 
             logger.info(
                 f"[PROGRESS #{self._think_count}] "
-                f"hosts={total_hosts} owned={owned_hosts} "
-                f"recon_sent={recon_keys} pending_recon={pending_recon} "
-                f"payloads={pending_payloads} "
+                f"{overall*100:.0f}% |{bar}| "
+                f"[{goal}] "
+                f"hosts={total_hosts}/{scope_size} owned={owned_hosts} "
+                f"tasks={done_tasks}/{total_tasks} pending={pending_recon} "
                 f"vectors={total_vec}(ok={success_vec}) "
-                f"stall={focus.get('stall_count', 0)}/{mission.get('max_stall_count', 10)} "
-                f"target={focus.get('active_target', '?')} "
-                f"conf={focus.get('confidence', 0):.2f} "
-                f"|{bar_owned}|"
+                f"stall={stall}/{max_stall} "
+                f"target={target} conf={conf:.2f}"
             )
         except Exception as e:
             logger.debug(f"Progress print failed: {e}")
@@ -903,9 +944,35 @@ class Orchestrator:
             ))
             return
 
-        # 条件3: stall 耗尽
+        # 条件3: stall 累积 → 强制阶段转换（RECON → EXPLOIT）
         stall_count = focus.get("stall_count", 0)
         max_stall   = mission.get("max_stall_count", 10)
+        current_goal = focus.get("current_goal", "RECON")
+
+        # stall >= 4 且仍在 RECON：强制切换到 EXPLOIT 尝试突破
+        FORCE_EXPLOIT_THRESHOLD = 4
+        if (stall_count >= FORCE_EXPLOIT_THRESHOLD
+                and current_goal in ("RECON", "recon", "SCAN")
+                and focus.get("active_target")):
+            logger.warning(
+                f"空转 {stall_count} 次且仍在 {current_goal}，"
+                f"强制切换到 EXPLOIT 阶段（目标: {focus['active_target']}）"
+            )
+            focus["current_goal"] = "EXPLOIT"
+            focus["stall_count"] = 0
+            focus["hypothesis"] = (
+                f"RECON 阶段空转 {stall_count} 次后强制进入 EXPLOIT，"
+                f"尝试对 {focus['active_target']} 使用默认凭据或已知漏洞"
+            )
+            await self.state_api.apply_mutation(StateMutation(
+                operation=MutationOperation.WRITE,
+                domain=StateDomain.FOCUS,
+                payload=focus,
+            ))
+            await self._trigger_think(force=True)
+            return
+
+        # stall 耗尽 → 清理退出
         if stall_count >= max_stall:
             await self.event_bus.publish(Event(
                 type=EventType.CLEANUP_STATE,
