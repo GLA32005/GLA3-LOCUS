@@ -174,7 +174,7 @@ class StatePruner:
                 break
             entry = {
                 "source":    item.get("source"),
-                "summary":   item.get("summary", "")[:500],
+                "summary":   (item.get("content") or item.get("summary") or "")[:500],
                 "relevance": item.get("relevance"),
             }
             if item.get("requested_by_agent"):

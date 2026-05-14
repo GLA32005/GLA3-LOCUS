@@ -254,25 +254,13 @@ class ReconAgent(BaseAgent):
             if not raw:
                 return self._fallback_output(), 0
             
-            # JSON 提取
-            import re
-            json_match = re.search(r'(\{.*\}|\[.*\])', raw, re.DOTALL)
-            if json_match:
-                raw = json_match.group(1).strip()
+            from core.llm_provider import parse_robust_json
+            output = parse_robust_json(raw)
+            if not output:
+                logger.error(f"ReconAgent 输出非法 JSON 且修复失败: {raw[:200]}...")
+                return self._fallback_output(), 0
             
-            try:
-                return json.loads(raw), tokens
-            except json.JSONDecodeError:
-                # 启发式修复：尝试补全可能缺失的引号和括号
-                try:
-                    tmp_raw = raw
-                    if tmp_raw.count('"') % 2 != 0: tmp_raw += '"'
-                    if tmp_raw.count('{') > tmp_raw.count('}'): 
-                        tmp_raw += '}' * (tmp_raw.count('{') - tmp_raw.count('}'))
-                    return json.loads(tmp_raw), tokens
-                except:
-                    logger.error(f"ReconAgent 输出非法 JSON 且修复失败: {raw[:200]}...")
-                    return self._fallback_output(), 0
+            return output, tokens
         except Exception as e:
             logger.error(f"ReconAgent LLM 调用失败: {e}")
             return self._fallback_output(), 0

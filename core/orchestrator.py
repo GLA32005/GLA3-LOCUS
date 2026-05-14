@@ -676,10 +676,23 @@ class Orchestrator:
     async def _handle_rag_query(self, query: str):
         """执行 RAG 查询，结果写入 context_retrievals"""
         results = await self.rag.query(query, top_k=5)
+        # RetrievalResult 是 dataclass，转为 dict 供 JSON 序列化
+        from dataclasses import asdict
+        items = []
+        for r in results:
+            try:
+                items.append(asdict(r))
+            except Exception:
+                items.append({
+                    "content": getattr(r, "content", str(r)),
+                    "source": getattr(r, "source", "unknown"),
+                    "relevance": getattr(r, "relevance", 0.0),
+                    "metadata": getattr(r, "metadata", {}),
+                })
         mutation = StateMutation(
             operation=MutationOperation.APPEND,
             domain=StateDomain.CONTEXT_RETRIEVALS,
-            payload={"items": results}
+            payload={"items": items}
         )
         await self.state_api.apply_mutation(mutation)
 

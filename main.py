@@ -165,6 +165,16 @@ async def _clean_all_state(state_api: StateAPI):
     except Exception as e:
         logger.error(f"Clean: ClickHouse 清理失败: {e}")
 
+    # ChromaDB: 删除持久化目录（防止嵌入函数冲突）
+    chroma_path = os.environ.get("CHROMA_PATH", "./memory/chroma_db")
+    if os.path.exists(chroma_path):
+        import shutil
+        try:
+            shutil.rmtree(chroma_path)
+            logger.info(f"Clean: ChromaDB 目录已删除: {chroma_path}")
+        except Exception as e:
+            logger.warning(f"Clean: ChromaDB 清理失败: {e}")
+
     logger.info("=== 历史数据清理完成 ===")
 
 

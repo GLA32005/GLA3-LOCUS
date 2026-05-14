@@ -79,25 +79,11 @@ class Planner:
             if not raw.strip():
                 return self._fallback_output()
 
-            # 更加鲁棒的 JSON 提取：寻找第一个 { 和最后一个 }
-            import re
-            json_match = re.search(r'(\{.*\}|\[.*\])', raw, re.DOTALL)
-            if json_match:
-                raw = json_match.group(1).strip()
-            
-            try:
-                output = json.loads(raw)
-            except json.JSONDecodeError:
-                # 最后的尝试：尝试补全可能缺失的引号和括号
-                try:
-                    tmp_raw = raw
-                    if tmp_raw.count('"') % 2 != 0: tmp_raw += '"'
-                    if tmp_raw.count('{') > tmp_raw.count('}'): 
-                        tmp_raw += '}' * (tmp_raw.count('{') - tmp_raw.count('}'))
-                    output = json.loads(tmp_raw)
-                except:
-                    logger.error(f"Planner 输出非法 JSON 且修复失败: {raw[:200]}...")
-                    return self._fallback_output()
+            from core.llm_provider import parse_robust_json
+            output = parse_robust_json(raw)
+            if not output:
+                logger.error(f"Planner 输出非法 JSON 且修复失败: {raw[:200]}...")
+                return self._fallback_output()
             
             if not isinstance(output, dict):
                 logger.error(f"Planner: JSON 解析结果不是 dict (type={type(output).__name__}), value={str(output)[:100]}")

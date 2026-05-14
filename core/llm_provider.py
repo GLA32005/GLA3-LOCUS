@@ -1,8 +1,69 @@
 import logging
 import httpx
 import json
+import re
 
 logger = logging.getLogger(__name__)
+
+def parse_robust_json(raw: str) -> dict | list | None:
+    """
+    从 LLM 输出中鲁棒地提取并解析 JSON。
+    支持：
+    1. 自动剥离 Markdown 代码块
+    2. 正则匹配最外层 {} 或 []
+    3. 启发式修复未闭合的引号或括号（通常由 token 截断引起）
+    """
+    if not raw or not raw.strip():
+        return None
+
+    # 1. 剥离可能存在的 Markdown 标记
+    clean_raw = raw.strip()
+    if clean_raw.startswith("```"):
+        # 寻找第一个 { 或 [
+        start_idx = min(
+            clean_raw.find("{") if "{" in clean_raw else len(clean_raw),
+            clean_raw.find("[") if "[" in clean_raw else len(clean_raw)
+        )
+        # 寻找最后一个 } 或 ]
+        end_idx = max(
+            clean_raw.rfind("}") if "}" in clean_raw else -1,
+            clean_raw.rfind("]") if "]" in clean_raw else -1
+        )
+        if 0 <= start_idx < end_idx:
+            clean_raw = clean_raw[start_idx : end_idx + 1]
+
+    # 2. 基础正则提取（防止前后有废话）
+    json_match = re.search(r'(\{.*\}|\[.*\])', clean_raw, re.DOTALL)
+    if json_match:
+        clean_raw = json_match.group(1).strip()
+
+    try:
+        return json.loads(clean_raw)
+    except json.JSONDecodeError:
+        # 3. 启发式修复（补齐截断）
+        try:
+            tmp = clean_raw
+            # 补齐未闭合引号（简单计数，不处理复杂转义）
+            if tmp.count('"') % 2 != 0:
+                tmp += '"'
+            
+            # 补齐未闭合括号
+            brackets = {"{": "}", "[": "]"}
+            stack = []
+            for char in tmp:
+                if char in brackets.keys():
+                    stack.append(char)
+                elif char in brackets.values():
+                    if stack and brackets[stack[-1]] == char:
+                        stack.pop()
+            
+            # 逆序补全
+            while stack:
+                tmp += brackets[stack.pop()]
+                
+            return json.loads(tmp)
+        except Exception:
+            return None
 
 async def call_llm_anthropic_style(
     api_key: str, 

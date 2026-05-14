@@ -1,0 +1,72 @@
+{
+  "generated_at": "2026-05-14T03:06:40.838278+00:00",
+  "mission": {
+    "goal": "获取内网核心数据库服务器权限",
+    "scope": [
+      "192.168.1.0/29"
+    ],
+    "risk_level": 3
+  },
+  "executive_summary": "对 192.168.1.0/29 执行了 4 次攻击尝试，成功 0 次（0.0%）。共发现 3 台主机，攻破 0 台。清理覆盖率：N/A。",
+  "findings": [],
+  "cleanup_verification": {
+    "total_footprints": 0,
+    "cleaned": 0,
+    "uncleaned": 0,
+    "cleanup_rate": "N/A",
+    "details": []
+  },
+  "statistics": {
+    "total_vectors": 4,
+    "success_count": 0,
+    "fail_count": 0,
+    "blocked_count": 0,
+    "abandoned_count": 0,
+    "success_rate": "0.0%",
+    "avg_info_gain": 0.0,
+    "total_hosts": 3,
+    "owned_hosts": 0,
+    "hallucination_count": 0,
+    "recommendation": "CONTINUE"
+  },
+  "assets_summary": [
+    {
+      "ip": "192.168.1.1",
+      "access_level": "NONE",
+      "os": "Unknown",
+      "out_of_scope": null,
+      "open_ports": [
+        21,
+        8080,
+        5080,
+        445,
+        443,
+        139,
+        80,
+        23
+      ]
+    },
+    {
+      "ip": "192.168.1.4",
+      "access_level": "NONE",
+      "os": "Unknown",
+      "out_of_scope": null,
+      "open_ports": [
+        80,
+        22,
+        53
+      ]
+    },
+    {
+      "ip": "192.168.1.5",
+      "access_level": "NONE",
+      "os": "Unknown",
+      "out_of_scope": null,
+      "open_ports": [
+        80,
+        853
+      ]
+    }
+  ],
+  "recommendations": []
+}

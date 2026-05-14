@@ -59,7 +59,7 @@ class NmapTool(BaseTool):
         try:
             import ipaddress as _ipa
             if _ipa.ip_address(ip).is_private:
-                args += ["--min-rate", "1000"]
+                args += ["--min-rate", "1000", "--max-rtt-timeout", "200ms"]
         except ValueError:
             pass
 
