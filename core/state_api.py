@@ -43,6 +43,36 @@ class StateAPI:
         self.redis = redis.from_url(redis_url, decode_responses=True)
         self.neo4j = GraphDatabase.driver(neo4j_url, auth=neo4j_auth)
         self.ch = clickhouse_client
+        self._ch_lock = asyncio.Lock()  # ClickHouse 驱动非线程安全，必须加锁
+
+        # Lua script for atomic FOCUS update (Read-Modify-Write protection)
+        self._focus_update_lua = self.redis.register_script("""
+            local key = KEYS[1]
+            local updates_json = ARGV[1]
+            local updates = cjson.decode(updates_json)
+            
+            local current_raw = redis.call('get', key)
+            local current = {}
+            if current_raw then
+                current = cjson.decode(current_raw)
+            end
+            
+            for k, v in pairs(updates) do
+                current[k] = v
+            end
+            
+            local result_raw = cjson.encode(current)
+            redis.call('set', key, result_raw)
+            return result_raw
+        """)
+
+    async def _run_ch(self, query: str, params: dict = None) -> list:
+        """封装同步 ClickHouse 执行为异步，并带锁防止并发冲突"""
+        async with self._ch_lock:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, lambda: self.ch.execute(query, params or {})
+            )
 
     # ── 统一提交入口 ──────────────────────────────────────────
 
@@ -91,6 +121,8 @@ class StateAPI:
         raw = await self.redis.get("mission")
         return json.loads(raw) if raw else {}
 
+    # set_mission 被移除以强制执行“约束①：mission 运行时只读”
+
     async def load_mission(self, mission: dict):
         """仅启动时调用一次，后续不可修改"""
         if await self.redis.exists("mission"):
@@ -114,11 +146,16 @@ class StateAPI:
             return list(result)  # 同步读取所有记录
 
     async def _run_cypher(self, query: str, **params) -> list:
-        """封装同步 Cypher 为异步，避免直接 await session.run"""
+        """封装同步 Cypher 为异步，并带 30s 超时保护"""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, lambda: self._run_cypher_sync(query, **params)
-        )
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: self._run_cypher_sync(query, **params)),
+                timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Neo4j 查询超时 (30s): {query[:100]}")
+            return []
 
     async def get_host_full(self, ip: str) -> Optional[dict]:
         """获取某主机的完整信息，包括所有关联 Service 和 Credential"""
@@ -225,9 +262,7 @@ class StateAPI:
             FROM tried_vectors
             {where}
         """
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.ch.execute(query, params)
-        )
+        result = await self._run_ch(query, params)
         if not result:
             return {"total": 0, "recommendation": "EXPLORE"}
 
@@ -256,11 +291,7 @@ class StateAPI:
             where_parts.append("target = %(target)s")
             params["target"] = target
         where = "WHERE " + " AND ".join(where_parts)
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self.ch.execute(
-                f"SELECT count() FROM tried_vectors {where}", params
-            )
-        )
+        result = await self._run_ch(f"SELECT count() FROM tried_vectors {where}", params)
         return result[0][0] if result else 0
 
     # ── pending_payloads ──────────────────────────────────────
@@ -325,18 +356,15 @@ class StateAPI:
 
     async def get_all_footprints(self) -> list[dict]:
         """Cleanup Agent 读取全量 footprints，不经 StatePruner"""
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, self.ch.execute,
-            "SELECT * FROM footprints ORDER BY ts ASC"
-        )
+        result = await self._run_ch("SELECT * FROM footprints ORDER BY ts ASC")
         columns = ["id", "type", "target", "detail", "cleaned", "ts"]
         return [dict(zip(columns, row)) for row in (result or [])]
 
     async def mark_footprint_cleaned(self, footprint_id: str):
-        await asyncio.get_event_loop().run_in_executor(
-            None, self.ch.execute,
-            f"ALTER TABLE footprints UPDATE cleaned = true "
-            f"WHERE id = '{footprint_id}'"
+        """遵循约束②：不修改原 footprints 表，而是向清理日志表追加记录"""
+        await self._run_ch(
+            "INSERT INTO cleaned_footprints (id) VALUES",
+            [(footprint_id,)]
         )
 
     # ── 内部写入方法 ──────────────────────────────────────────
@@ -398,9 +426,8 @@ class StateAPI:
     async def _apply_tried_vectors(self, mutation: StateMutation):
         """只追加，永不修改（约束②）"""
         p = mutation.payload
-        await asyncio.get_event_loop().run_in_executor(
-            None, self.ch.execute,
-            """INSERT INTO tried_vectors VALUES""",
+        await self._run_ch(
+            "INSERT INTO tried_vectors VALUES",
             [(
                 p.get("id", str(__import__("uuid").uuid4())),
                 p.get("target", ""),
@@ -420,6 +447,10 @@ class StateAPI:
 
     async def _apply_focus(self, mutation: StateMutation):
         await self.redis.set("focus", json_dumps(mutation.payload))
+
+    async def update_focus_atomic(self, updates: dict):
+        """原子级更新 focus，防止竞态冲突"""
+        await self._focus_update_lua(keys=["focus"], args=[json.dumps(updates)])
 
     async def _apply_pending_payloads(self, mutation: StateMutation):
         p = mutation.payload
@@ -480,17 +511,30 @@ class StateAPI:
 
     async def _apply_async_tasks(self, mutation: StateMutation):
         p = mutation.payload
-        tid = p.get("id", str(__import__("uuid").uuid4()))
-        p["id"] = tid
-        await self.redis.set(f"async_task:{tid}", json_dumps(p))
-        await self.redis.sadd("idx:async_task_ids", tid)
+        tid = p.get("id")
+        if not tid:
+             tid = str(__import__("uuid").uuid4())
+             p["id"] = tid
+        
+        key = f"async_task:{tid}"
+        if mutation.operation == MutationOperation.UPDATE_STATUS:
+            existing_raw = await self.redis.get(key)
+            if existing_raw:
+                existing = json.loads(existing_raw)
+                # 仅更新 status，防止污染其他字段
+                existing["status"] = p.get("status", existing.get("status"))
+                if "processed" in p:
+                    existing["processed"] = p["processed"]
+                await self.redis.set(key, json_dumps(existing))
+        else:
+            await self.redis.set(key, json_dumps(p))
+            await self.redis.sadd("idx:async_task_ids", tid)
 
     async def _apply_footprints(self, mutation: StateMutation):
         """只追加（约束②扩展到 footprints）"""
         p = mutation.payload
-        await asyncio.get_event_loop().run_in_executor(
-            None, self.ch.execute,
-            """INSERT INTO footprints VALUES""",
+        await self._run_ch(
+            "INSERT INTO footprints VALUES",
             [(
                 p.get("id", str(__import__("uuid").uuid4())),
                 p.get("type", "UNKNOWN"),
@@ -523,9 +567,8 @@ class StateAPI:
 
     async def _write_violation_alert(self, mutation: StateMutation, reason: str):
         """违反约束时写入告警"""
-        await asyncio.get_event_loop().run_in_executor(
-            None, self.ch.execute,
-            """INSERT INTO footprints VALUES""",
+        await self._run_ch(
+            "INSERT INTO footprints VALUES",
             [(
                 str(__import__("uuid").uuid4()),
                 "CONSTRAINT_VIOLATION",

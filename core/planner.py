@@ -23,6 +23,7 @@ PLANNER_SYSTEM = """
 5. 如果 focus.opportunity_flag == true，act.agent 必须是 exploit
 6. 漏洞链思维：当发现多个低/中危漏洞时，评估它们的组合是否构成高危攻击链（如 信息泄露+弱口令=未授权访问，SSRF+文件读取=RCE，文件上传+路径遍历=WebShell）。hypothesis 应包含组合路径
 7. 蜜罐警觉：如果目标 honeypot_suspect=true，立即切换到其他目标
+8. **重要**：请保持 `think` 字段极其简洁（50字以内），优先确保 JSON 结构的完整性，防止因推理过长导致输出截断。
 
 ## 输出格式
 {
@@ -40,9 +41,9 @@ PLANNER_SYSTEM = """
   "async_task": "需要长耗时任务时填写，否则填 null",
   "stall_assessment": "是否陷入僵局及原因",
   "focus_update": {
-    "active_target": "IP或null（不变则填null）",
+    "active_target": "只有在确定要切换攻击目标时才填入新的 IP，否则必须填 null（以保留当前焦点）",
     "current_goal": "RECON/EXPLOIT/PRIVESC/LATERAL/PERSIST/REPORT 之一",
-    "stall_count": "数字（如果本轮无进展则加1，否则置0）"
+    "stall_count": "如果不确定进度，不要输出此字段，系统会自动维护"
   }
 }
 """
@@ -52,18 +53,18 @@ class Planner:
 
     def __init__(self, model: str = "Qwen3.5-9B-MLX-8bit", 
                  api_key: str = None, base_url: str = None):
-        self.api_key = api_key or "Ww131421"
+        self.api_key = api_key
         self.base_url = base_url or "http://127.0.0.1:8866"
         logger.info(f"Planner init: model={model}, base_url={self.base_url}, key_len={len(self.api_key)}")
         self.client = AsyncAnthropic(api_key=self.api_key, base_url=self.base_url)
         self.model  = model
 
-    async def think(self, pruned_view: dict) -> dict:
+    async def think(self, pruned_view: dict, system_hint: str = None) -> dict:
         """
         执行一次 Think 节拍。
         输入是 StatePruner 生成的裁剪视图，输出是结构化 Act 指令。
         """
-        prompt = self._build_prompt(pruned_view)
+        prompt = self._build_prompt(pruned_view, system_hint=system_hint)
 
         try:
             from core.llm_provider import call_llm_anthropic_style
@@ -73,7 +74,7 @@ class Planner:
                 model=self.model,
                 system=PLANNER_SYSTEM,
                 prompt=prompt,
-                max_tokens=4000
+                max_tokens=6000
             )
 
             if not raw.strip():
@@ -114,9 +115,11 @@ class Planner:
             # 返回安全的降级指令：派 Recon 补充情报
             return self._fallback_output()
 
-    def _build_prompt(self, view: dict) -> str:
+    def _build_prompt(self, view: dict, system_hint: str = None) -> str:
         """构建 Planner Prompt，突出关键信息"""
         lines = ["## 当前攻击状态\n"]
+        if system_hint:
+            lines.append(f"> [!IMPORTANT]\n> {system_hint}\n")
 
         # mission 摘要
         m = view.get("mission", {})

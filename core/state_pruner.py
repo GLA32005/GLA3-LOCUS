@@ -40,7 +40,9 @@ class StatePruner:
         mission = await state_api.get_mission()
         # 展开 CIDR 为具体 IP 列表，降低 LLM 理解 CIDR 的难度
         mission = dict(mission)  # 避免修改原始数据
-        mission["scope_expanded"] = self._expand_scope(mission.get("scope", []))
+        # 混合 pre-resolved IPs (from domains) 和 CIDR 展开
+        base_scope = mission.get("scope_expanded", mission.get("scope", []))
+        mission["scope_expanded"] = self._expand_scope(base_scope)
         view["mission"] = mission
         used += self.MISSION_TOKENS
 
@@ -119,6 +121,12 @@ class StatePruner:
             # active_target 全量展开（约占 assets budget 60%）
             host_detail = await state_api.get_host_full(active_target)
             if host_detail:
+                # ── 增强状态感知 (Issue 1 & 6) ──
+                # 在视图中显式展示不可达状态及超时统计
+                host_props = host_detail.get("host", {})
+                if host_props.get("unreachable"):
+                    host_props["_system_note"] = "!! 警告：此目标经多次探测被判定为不可达 (TARGET_UNREACHABLE) !!"
+                
                 # 截断 banner 等长字段防止超预算
                 for svc in host_detail.get("services", []):
                     if len(svc.get("banner", "")) > 200:

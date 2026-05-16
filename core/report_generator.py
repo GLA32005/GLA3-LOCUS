@@ -68,7 +68,7 @@ class ReportGenerator:
 
     def __init__(self, model: str = "Qwen3.5-9B-MLX-8bit", 
                  api_key: str = None, base_url: str = None):
-        self.api_key = api_key or "Ww131421"
+        self.api_key = api_key
         self.base_url = base_url or "http://127.0.0.1:8866"
         self._client = AsyncAnthropic(api_key=self.api_key, base_url=self.base_url)
         self._model = model
@@ -125,8 +125,7 @@ class ReportGenerator:
     async def _collect_findings(self, state_api) -> list[dict]:
         """从 tried_vectors 提取成功的攻击发现"""
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, state_api.ch.execute,
+            result = await state_api._run_ch(
                 """
                 SELECT id, target, type, payload, result, fail_reason,
                        info_gain, retry_count, ts

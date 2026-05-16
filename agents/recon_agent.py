@@ -58,22 +58,28 @@ _SYSTEM_PROMPT = """\
 2. 所有 target 必须在 mission.scope 的 CIDR 范围内
 3. 不生成重复任务（参考 vectors_summary 和已知服务列表）
 4. 长耗时工具（port_scan_full / dir_enum / vuln_scan）标记 is_async: true
-5. 单轮任务 noise_cost 总和不超过 max_noise 的 20%
-6. 已有某端口详细信息时，不要重复端口扫描，改做服务深度探测
-7. 没有 active_target 时，优先对 scope 内第一个 IP 做初始 port_scan
-8. 蜜罐识别：如果目标 honeypot_suspect=true（端口数>100 或 banner 全部一致），不再对其投入侦察资源，切换到其他目标
+5. **输出格式：必须输出合法 JSON。请保持 `think` 字段极其简洁（50字以内），优先确保 JSON 结构的完整性，防止因推理过长导致输出截断。**
+6. 单轮任务 noise_cost 总和不超过 max_noise 的 20%
+7. 已有某端口详细信息时，不要重复端口扫描，改做服务深度探测
+8. 没有 active_target 时，优先对 scope 内第一个 IP 做初始 port_scan
+9. 蜜罐警觉：如果目标 honeypot_suspect=true（端口数>100 或 banner 全部一致），不再对其投入侦察资源，切换到其他目标
 
-## 工具选项
+## 工具选项（严禁发明任何不在下表中的工具名）
 - port_scan       : nmap 快速端口扫描（单主机，Top-1000 端口）
 - port_scan_full  : nmap 全端口扫描（单主机，0-65535）— 标记 is_async
-- service_enum    : nmap -sV 服务版本识别（针对已知开放端口）
+- service_enum    : nmap -sV 服务版本识别（针对已知开放端口，较慢且易被拦截）
 - banner_grab     : netcat/telnet 抓取 banner（轻量，低噪音）
 - vuln_scan       : nuclei 漏洞扫描（针对已知服务）— 标记 is_async
 - dir_enum        : feroxbuster 目录枚举（针对 HTTP/HTTPS）— 标记 is_async
 - smb_enum        : enum4linux-ng SMB/RPC 枚举（发现 445 后使用）
 - ldap_enum       : ldapsearch AD 枚举（发现 389/636 或域控后使用）
-- http_probe      : httpx 探测 HTTP 服务标题和指纹
+- http_probe      : httpx 探测 HTTP 服务标题和指纹（Web 侦察的首选）
 - cred_spray      : 已知凭据对新目标的复用测试
+
+## 侦察方法论
+1. **Web 优先**：对于 80/443/8080 等 Web 端口，优先使用 `http_probe` 而非 `service_enum`。
+2. **渐进探测**：先 `banner_grab`，再根据返回结果决定是否需要 `vuln_scan`。
+3. **绕过 403**：发现 Web 403 时，应尝试 `dir_enum` 寻找非公开路径。
 
 ## 输出格式
 {
@@ -117,7 +123,7 @@ class ReconAgent(BaseAgent):
     def __init__(self, model: str = "Qwen3.5-9B-MLX-8bit", 
                  api_key: str = None, base_url: str = None):
         super().__init__(AgentType.RECON)
-        self.api_key = api_key or "Ww131421"
+        self.api_key = api_key
         self.base_url = base_url or "http://127.0.0.1:8866"
         self.client = AsyncAnthropic(api_key=self.api_key, base_url=self.base_url)
         self.model = model
@@ -129,9 +135,29 @@ class ReconAgent(BaseAgent):
         mutations: list[StateMutation] = []
         events: list[Event] = []
 
-        # LLM 推理
-        prompt = self._build_prompt(view, input.trigger_event)
-        llm_out, tokens_used = await self._call_llm(prompt)
+        # 1. 尝试启发式规则 (Issue 6)
+        heuristic_tasks = self._apply_heuristic_rules(view)
+        
+        # 如果启发式规则已经生成了足够的任务，且不是关键阶段，可以跳过 LLM 推理以节省时间和 Token
+        # 判定标准：启发式任务 >= 3 且没有 active_target 的关键变动请求
+        skip_llm = len(heuristic_tasks) >= 3 and not view.get("focus", {}).get("opportunity_flag")
+        
+        if skip_llm:
+            llm_out = {
+                "think": "启发式规则已生成足够任务，跳过 LLM 推理以加速流程。",
+                "tasks": heuristic_tasks,
+                "info_needed": None,
+                "knowledge_query": None
+            }
+            tokens_used = 0
+            logger.info(f"ReconAgent [{input.agent_id}]: 触发启发式快路径，跳过 LLM")
+        else:
+            # LLM 推理
+            prompt = self._build_prompt(view, input.trigger_event)
+            llm_out, tokens_used = await self._call_llm(prompt)
+            # 合并结果
+            llm_out["tasks"] = heuristic_tasks + llm_out.get("tasks", [])
+
         think_log = llm_out.get("think", "")
         raw_tasks = llm_out.get("tasks", [])
         info_needed = llm_out.get("info_needed")
@@ -159,9 +185,31 @@ class ReconAgent(BaseAgent):
         raw_tasks = raw_tasks[:MAX_TASKS_PER_RUN]
 
         # 硬编码 scope 验证（LLM 不可信）
-        scope = view.get("mission", {}).get("scope", [])
+        mission_data = view.get("mission", {})
+        scope = mission_data.get("scope_expanded", mission_data.get("scope", []))
         valid_tasks = [t for t in raw_tasks
                        if self._is_in_scope(t.get("target", ""), scope)]
+
+        # CIDR 展开：将网段任务拆解为单 IP 任务（限制最大展开数以防爆炸）
+        expanded_tasks = []
+        for t in valid_tasks:
+            target = t.get("target", "")
+            if "/" in target and not target.endswith("/32"):
+                try:
+                    import ipaddress as _ipa
+                    net = _ipa.ip_network(target, strict=False)
+                    if net.num_addresses <= 64:  # 只自动展开 /26 或更小的网段
+                        logger.info(f"ReconAgent: 展开网段任务 {target} -> {net.num_addresses-2} 个主机")
+                        for ip in net.hosts():
+                            new_task = dict(t)
+                            new_task["target"] = str(ip)
+                            expanded_tasks.append(new_task)
+                        continue
+                    else:
+                        logger.warning(f"ReconAgent: 网段 {target} 太大 (>{net.num_addresses})，保持原样下发")
+                except Exception as e:
+                    logger.debug(f"ReconAgent: CIDR 展开失败 {target}: {e}")
+            expanded_tasks.append(t)
 
         # 去重：检查 view 中已有的 pending/recon 任务，跳过相同 target+tool 的任务
         existing_tasks = view.get("pending_recon_list", [])
@@ -171,7 +219,7 @@ class ReconAgent(BaseAgent):
             if t.get("status") in ("PENDING", "RUNNING")
         }
         deduped_tasks = []
-        for t in valid_tasks:
+        for t in expanded_tasks:
             key = (t.get("target", ""), t.get("tool", "port_scan"))
             if key in existing_keys:
                 logger.debug(f"ReconAgent: 跳过重复任务 {key}")
@@ -248,7 +296,7 @@ class ReconAgent(BaseAgent):
                 model=self.model,
                 system=_SYSTEM_PROMPT,
                 prompt=prompt,
-                max_tokens=2000
+                max_tokens=4000
             )
             
             if not raw:
@@ -382,6 +430,58 @@ class ReconAgent(BaseAgent):
         )
         return "\n".join(lines)
 
+    def _apply_heuristic_rules(self, view: dict) -> list[dict]:
+        """
+        启发式规则层：对显而易见的探测步骤直接生成任务，无需 LLM 介入。
+        """
+        tasks = []
+        assets = view.get("assets", {})
+        active_host = assets.get("active_host")
+        if not active_host:
+            return []
+        
+        ip = active_host.get("host", {}).get("ip")
+        services = active_host.get("services", [])
+        
+        # 规则 1: 发现新端口但无服务版本 -> service_enum
+        for svc in services:
+            if not svc.get("app") or svc.get("app") == "unknown":
+                tasks.append({
+                    "tool": "service_enum",
+                    "target": f"{ip}:{svc['port']}",
+                    "params": {},
+                    "priority": 0.8,
+                    "noise_cost": 2,
+                    "rationale": "启发式规则：自动探测未知服务的版本信息"
+                })
+        
+        # 规则 2: HTTP 服务发现 -> http_probe + dir_enum
+        for svc in services:
+            port = svc.get("port")
+            app = svc.get("app", "").lower()
+            if port in {80, 443, 8080, 8443} or "http" in app:
+                target = f"{ip}:{port}"
+                tasks.append({
+                    "tool": "http_probe",
+                    "target": target,
+                    "params": {},
+                    "priority": 0.7,
+                    "noise_cost": 1,
+                    "rationale": "启发式规则：发现 Web 端口，自动执行 http_probe"
+                })
+                # 强制增加异步目录枚举，破除指纹识别失败导致的僵局
+                tasks.append({
+                    "tool": "dir_enum",
+                    "target": target,
+                    "params": {},
+                    "priority": 0.6,
+                    "noise_cost": 2,
+                    "is_async": True,
+                    "rationale": "启发式规则：Web 目标自动开启深度扫描"
+                })
+                
+        return tasks
+
     # ── 辅助 ─────────────────────────────────────────────────
 
     def _is_in_scope(self, target: str, scope: list[str]) -> bool:
@@ -390,15 +490,28 @@ class ReconAgent(BaseAgent):
             return False
         ip_str = target.split(":")[0]   # 去掉端口
         try:
+            # 1. 尝试作为单个 IP
             ip_obj = ipaddress.ip_address(ip_str)
             return any(
                 ip_obj in ipaddress.ip_network(cidr, strict=False)
                 for cidr in scope
             )
         except ValueError:
-            # 域名目标直接拒绝，不进行 DNS 解析（约束⑥）
-            logger.warning(f"ReconAgent: 拒绝非 IP 目标 '{target}'，scope 只接受 CIDR 内的 IP")
-            return False
+            # 2. 尝试作为网络 (CIDR)
+            try:
+                net_obj = ipaddress.ip_network(ip_str, strict=False)
+                # 检查该网段是否完全包含在 scope 的某个网段内
+                return any(
+                    net_obj.subnet_of(ipaddress.ip_network(cidr, strict=False))
+                    for cidr in scope
+                )
+            except Exception:
+                # 3. 尝试作为域名直接匹配
+                if ip_str in scope:
+                    return True
+                # 域名目标直接拒绝，不进行 DNS 解析（约束⑥）
+                logger.warning(f"ReconAgent: 拒绝非 IP/CIDR/Domain 目标 '{target}'，不在授权范围内")
+                return False
 
     def _fallback_output(self) -> dict:
         """LLM 异常时的安全降级：不生成任何任务，等待 Planner 重新调度"""

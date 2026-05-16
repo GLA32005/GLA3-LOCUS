@@ -91,6 +91,10 @@ class Orchestrator:
         self._recon_sent_keys: set[str] = set()
         self._exploit_sent_keys: set[str] = set()
 
+        self._is_thinking = False
+        self._system_hint: Optional[str] = None  # 传给 Planner 的临时提示 (Issue 4)
+        self._host_timeouts: dict[str, int] = {}  # 追踪主机的连续超时/失败次数 (Issue 1)
+
         # 并发配额追踪
         self._current_noise = 0
         self._max_noise     = 0     # 从 mission 读取后初始化
@@ -163,6 +167,7 @@ class Orchestrator:
             EventType.STALL_DETECTED:       self._handle_stall_detected,
             EventType.CLEANUP_STATE:        self._handle_cleanup_state,
             EventType.HUMAN_APPROVAL_REQ:   self._handle_human_approval,
+            EventType.PAYLOAD_APPROVED:     self._handle_payload_approved,
         }
         handler = handlers.get(event.type)
         if handler:
@@ -239,16 +244,26 @@ class Orchestrator:
         if not force and now - self._last_think_time < interval:
             return
 
+        if self._is_thinking:
+            logger.debug("Orchestrator: Planner is busy, skipping trigger")
+            return
+
+        self._is_thinking = True
         self._last_think_time = now
         self._think_count += 1
 
         try:
             pruned_view = await self.pruner.generate_view(self.state_api)
-            planner_output = await self.planner.think(pruned_view)
+            planner_output = await self.planner.think(pruned_view, system_hint=self._system_hint)
+            # 消费完 hint 后清除，避免污染后续正常 Think
+            self._system_hint = None
+            
             await self._dispatch_planner_output(planner_output)
             await self._print_progress()
         except Exception as e:
             logger.error(f"Planner Think 失败: {e}")
+        finally:
+            self._is_thinking = False
 
     async def _dispatch_planner_output(self, output: dict):
         """处理 Planner 的 Act 指令"""
@@ -280,58 +295,80 @@ class Orchestrator:
         await self.state_api.clear_context_retrievals()
 
         # 将 Planner 的 focus_update 写回 State（Planner 无副作用，由此处代劳）
-        focus_update = output.get("focus_update")
-        if focus_update and isinstance(focus_update, dict):
-            current_focus = await self.state_api.get_focus()
-            if not isinstance(current_focus, dict):
-                current_focus = {}
-            
-            # 提取 Planner 外层的关键评估信息同步到 Focus
-            ext_update = {
-                "confidence": output.get("confidence", current_focus.get("confidence", 0)),
-                "hypothesis": output.get("hypothesis", current_focus.get("hypothesis", ""))
-            }
-            
-            try:
-                # 预提取
-                old_stall = int(current_focus.get("stall_count", 0))
-                
-                # 合并基本信息 (排除 LLM 可能返回的 stall_count)
-                llm_focus = {k: v for k, v in focus_update.items() if k != "stall_count"}
-                merged = {**current_focus, **ext_update, **llm_focus}
-                
-                # --- 核心逻辑：Orchestrator 严格掌控 stall_count ---
-                # 判定是否有阶段性实质进展：目标阶段改变（例如进入了之前未达到的阶段）
-                # 注意：置信度波动不再重置 stall_count，防止 LLM 通过改信心来刷掉计数
-                goal_changed = merged.get("current_goal") != current_focus.get("current_goal")
-                
-                if goal_changed:
-                    # 只有阶段改变时，才允许重置为 0
-                    merged["stall_count"] = 0
-                else:
-                    # 否则，维持旧值（并在后面视情况加 1）
-                    merged["stall_count"] = old_stall
-                
-                # 如果置信度没有显著提升 (>= 0.15)，则视为本轮思考无进展，计数加 1
-                conf_diff = float(merged.get("confidence") or 0) - float(current_focus.get("confidence") or 0)
-                if conf_diff < 0.15 and not goal_changed:
-                    merged["stall_count"] = old_stall + 1
-                    self._total_stall_count += 1
+        # 同时消费掉 opportunity_flag，使其不再保持 True
+        focus_update = output.get("focus_update") or {}
+        if not isinstance(focus_update, dict):
+             focus_update = {}
+             
+        # 提取核心评估指标
+        ext_update = {
+            "confidence": output.get("confidence", 0.5),
+            "hypothesis": output.get("hypothesis", "")
+        }
+        
+        # 合并基本信息 (排除 LLM 可能返回的 stall_count，且过滤掉 null 以防覆盖有效 IP)
+        llm_focus = {k: v for k, v in focus_update.items() 
+                     if k != "stall_count" and v is not None}
+        
+        # 原子获取旧状态以计算 stall_count
+        current_focus = await self.state_api.get_focus()
+        old_goal = current_focus.get("current_goal", "RECON")
+        new_goal = llm_focus.get("current_goal", old_goal)
+        active_target = llm_focus.get("active_target") or current_focus.get("active_target")
 
-                from .protocols import StateMutation, MutationOperation, StateDomain
-                await self.state_api.apply_mutation(StateMutation(
-                    operation=MutationOperation.WRITE,
-                    domain=StateDomain.FOCUS,
-                    payload=merged,
-                ))
-                logger.info(
-                    f"Focus updated: goal={merged.get('current_goal')} "
-                    f"target={merged.get('active_target', 'None')} "
-                    f"conf={float(merged.get('confidence') or 0):.2f} "
-                    f"stall={merged.get('stall_count', 0)}"
+        # 增加 EXPLOIT 硬拦截：如果没有服务信息，禁止进入 EXPLOIT 阶段 (Issue 2)
+        if new_goal == "EXPLOIT" and active_target:
+            host_info = await self.state_api.get_host_full(active_target)
+            services = host_info.get("services", []) if host_info else []
+            
+            # 优化：如果是由 stall 强制切换的，或者已有服务（不论有无指纹），则允许进入
+            is_forced = "强制进入 EXPLOIT" in (current_focus.get("hypothesis") or "")
+            if not services and not is_forced:
+                logger.warning(f"Orchestrator: 目标 {active_target} 尚无服务信息且非强制切换，拦截 EXPLOIT 切换，回退至 RECON")
+                new_goal = "RECON"
+                llm_focus["current_goal"] = "RECON"
+                
+                # 注入系统提示，破除死锁 (Issue 4)
+                if self._host_timeouts.get(active_target, 0) >= 1:
+                    self._system_hint = (
+                        f"警告：目标 {active_target} 无开放服务且之前的侦察任务多次超时。 "
+                        "请重新评估该目标的可达性，考虑使用更隐蔽的扫描手段或切换攻击目标，不要在原地空转。"
+                    )
+
+        # 增加 LATERAL 硬拦截：如果没有拿到任何机器权限，禁止进入 LATERAL 阶段
+        if new_goal == "LATERAL":
+            owned_count = await self.state_api.count_owned_hosts()
+            if owned_count == 0:
+                logger.warning(f"Orchestrator: 当前没有任何已控制的主机 (owned=0)，拦截 LATERAL 切换，回退至 EXPLOIT/RECON")
+                # 如果有目标且有服务，回退到 EXPLOIT，否则 RECON
+                if active_target:
+                    host_info = await self.state_api.get_host_full(active_target)
+                    services = host_info.get("services", []) if host_info else []
+                    new_goal = "EXPLOIT" if services else "RECON"
+                else:
+                    new_goal = "RECON"
+                llm_focus["current_goal"] = new_goal
+                
+                self._system_hint = (
+                    "警告：你试图进入 LATERAL (横向移动) 阶段，但当前没有任何已获取权限的主机 (owned=0)。"
+                    "横向移动必须在取得至少一台主机的控制权之后才能进行。请先继续对目标进行 RECON 或 EXPLOIT。"
                 )
-            except Exception as e:
-                logger.error(f"Focus 同步失败: {e}")
+
+        updates = {**ext_update, **llm_focus}
+        updates["opportunity_flag"] = False # 强制清理机会标志
+        updates["opportunity_target"] = None
+        
+        # 判定是否有实质性进展：阶段切换不再作为重置 stall 的依据 (Issue 5)
+        # stall_count 仅在此处自然递增，重置由 TASK_COMPLETED 等事件处理器负责
+        updates["stall_count"] = int(current_focus.get("stall_count", 0)) + 1
+            
+        await self.state_api.update_focus_atomic(updates)
+        logger.info(
+            f"Focus updated: goal={updates.get('current_goal')} "
+            f"target={updates.get('active_target', current_focus.get('active_target'))} "
+            f"conf={float(updates.get('confidence') or 0):.2f} "
+            f"stall={updates.get('stall_count', 0)}"
+        )
 
         # 路由到对应 Agent
         act = output.get("act")
@@ -353,6 +390,14 @@ class Orchestrator:
             await handler(act, output)
 
     # ── 事件处理器 ────────────────────────────────────────────
+
+    async def _handle_payload_approved(self, event: Event):
+        """
+        处理 Critic 审批通过的 Payload。
+        此处仅打印日志，Executor 会通过轮询机制消费 PENDING_PAYLOADS。
+        """
+        payload_id = event.payload.get("payload_id")
+        logger.info(f"Orchestrator: 收到 PAYLOAD_APPROVED 事件 (payload_id={payload_id})")
 
     async def _handle_payload_rejected(self, event: Event):
         """
@@ -406,7 +451,10 @@ class Orchestrator:
         target = result.get("target", "?")
         assets_found = result.get("assets_found", 0)
         duration = result.get("duration_ms", 0)
-        raw_summary = result.get("raw_summary", "")[:100]
+        raw_summary = str(result.get("raw_summary", ""))
+        if len(raw_summary) > 100:
+            raw_summary = raw_summary[:100] + "... [TRUNCATED]"
+            
         logger.info(
             f"[DONE] Tool: {tool} | Target: {target} | "
             f"Assets: {assets_found} | {duration}ms | {raw_summary}"
@@ -419,6 +467,35 @@ class Orchestrator:
             payload={"id": task_id, "status": "DONE", "processed": True}
         )
         await self.state_api.apply_mutation(mutation)
+        
+        # ── 超时与失败追踪 (Issue 1 & 6) ──
+        status = result.get("status", "DONE")
+        if status in ("TIMEOUT", "FAILED"):
+            self._host_timeouts[target] = self._host_timeouts.get(target, 0) + 1
+            if self._host_timeouts[target] >= 3:
+                logger.error(f"Orchestrator: 目标 {target} 连续 3 次探测失败，判定为 TARGET_UNREACHABLE")
+                await self.event_bus.publish(Event(
+                    type=EventType.TARGET_UNREACHABLE,
+                    priority=EventPriority.CRITICAL,
+                    source="orchestrator",
+                    payload={"target": target, "reason": "Consecutive timeouts/failures"}
+                ))
+                # 在 Neo4j 中标记不可达
+                await self.state_api.apply_mutation(StateMutation(
+                    operation=MutationOperation.UPSERT,
+                    domain=StateDomain.ASSETS,
+                    payload={"ip": target, "unreachable": True, "status": "UNREACHABLE"}
+                ))
+        else:
+            # 任务成功完成，重置计数
+            self._host_timeouts[target] = 0
+            await self.state_api.update_focus_atomic({"stall_count": 0})
+
+        # 启发式决策：Web 探测返回 403 Forbidden 时，自动追加 Bypass 侦察
+        status_code = str(result.get("status", ""))
+        if tool in ("screenshot", "http_probe", "banner_grab") and "403" in status_code:
+            logger.info(f"Orchestrator: 检测到 {target} 403 Forbidden，自动注入 Bypass 侦察")
+            await self._inject_bypass_task(target)
 
         # 新资产进来，触发 Planner 重算优先级队列
         await self._trigger_think(force=True)
@@ -429,14 +506,7 @@ class Orchestrator:
         logger.info(f"新资产发现: {target}")
 
         # 重置 stall_count 并查横向移动路径
-        focus = await self.state_api.get_focus()
-        if isinstance(focus, dict):
-            focus["stall_count"] = 0
-            await self.state_api.apply_mutation(StateMutation(
-                operation=MutationOperation.WRITE,
-                domain=StateDomain.FOCUS,
-                payload=focus
-            ))
+        await self.state_api.update_focus_atomic({"stall_count": 0})
 
         if target:
             paths = await self.state_api.find_lateral_paths(target)
@@ -476,14 +546,7 @@ class Orchestrator:
         await self.state_api.apply_mutation(mutation)
 
         # 重置 stall_count
-        focus = await self.state_api.get_focus()
-        if isinstance(focus, dict):
-            focus["stall_count"] = 0
-            await self.state_api.apply_mutation(StateMutation(
-                operation=MutationOperation.WRITE,
-                domain=StateDomain.FOCUS,
-                payload=focus
-            ))
+        await self.state_api.update_focus_atomic({"stall_count": 0})
 
         await self._trigger_think(force=True)
 
@@ -700,8 +763,8 @@ class Orchestrator:
 
     async def _executor_loop(self):
         """持续监听 APPROVED payload + PENDING recon tasks，配额内分配给 Executor"""
-        running_recon: set[str] = set()   # 正在执行的 task_id，防重复分发
         running_payloads: set[str] = set()
+        running_recon: set[str] = set()
 
         while self._is_running:
             # ── exploit payload ────────────────────────────
@@ -750,6 +813,8 @@ class Orchestrator:
         pid = payload.get("id", "")
         try:
             await self.executor.execute(payload)
+        except Exception as e:
+            logger.error(f"Executor payload {pid} 失败: {e}", exc_info=True)
         finally:
             self._current_noise -= noise_cost
             running_set.discard(pid)
@@ -759,6 +824,8 @@ class Orchestrator:
         task_id = task.get("id", "")
         try:
             await self.executor.execute_recon(task)
+        except Exception as e:
+            logger.error(f"Executor recon task {task_id} 失败: {e}", exc_info=True)
         finally:
             self._current_noise -= noise_cost
             running_set.discard(task_id)
@@ -766,6 +833,8 @@ class Orchestrator:
     async def _execute_cleanup_task(self, task: dict, noise_cost: int):
         try:
             await self.executor.execute_cleanup(task)
+        except Exception as e:
+            logger.error(f"Executor cleanup task 失败: {e}", exc_info=True)
         finally:
             self._current_noise -= noise_cost
 
@@ -846,20 +915,31 @@ class Orchestrator:
             if mutation.domain == StateDomain.KNOWLEDGE_QUERY:
                 continue
 
-            # 侦察任务去重：无论是同步(PENDING_RECON)还是异步(ASYNC_TASKS)，同一 target+tool 只派一次
+            # 侦察任务去重：使用 Redis 维护 30 分钟去重锁
+            # 引入参数哈希进行精细去重 (Issue 3)
             if mutation.domain in (StateDomain.PENDING_RECON, StateDomain.ASYNC_TASKS):
                 payload = mutation.payload
-                if "tool" in payload and "target" in payload:
-                    target = payload.get("target", "")
-                    tool = payload.get("tool", "")
-                    key = f"{target}:{tool}"
-                    if key in self._recon_sent_keys:
-                        logger.debug(f"Recon: 已派过 {key}，跳过重复下发")
+                target = payload.get("target", "")
+                tool = payload.get("tool", "")
+                if target and tool:
+                    params_str = json.dumps(payload.get("params", {}), sort_keys=True)
+                    import hashlib
+                    h = hashlib.md5(params_str.encode()).hexdigest()[:8]
+                    dedup_key = f"sent_recon:{target}:{tool}:{h}"
+                    
+                    if await self.state_api.redis.exists(dedup_key):
+                        logger.debug(f"Recon: {dedup_key} 处于冷却期，跳过重复下发")
                         continue
-                    self._recon_sent_keys.add(key)
+                    
+                    await self.state_api.redis.setex(dedup_key, 1800, "1")
 
             await self.state_api.apply_mutation(mutation)
             applied_count += 1
+            
+            # 自动触发 Critic 审查 (Issue 7)
+            if mutation.domain == StateDomain.PENDING_PAYLOADS:
+                logger.info("检测到新 Payload 写入，自动触发 Critic 审查")
+                asyncio.create_task(self._invoke_critic({}, {}))
 
         for event in output.events:
             await self.event_bus.publish(event)
@@ -982,10 +1062,17 @@ class Orchestrator:
                 domain=StateDomain.FOCUS,
                 payload=focus,
             ))
+            # 强制切换阶段：原子重置 stall 计数
+            await self.state_api.update_focus_atomic({
+                "current_goal": "EXPLOIT",
+                "stall_count": 0,
+                "hypothesis": f"RECON 阶段空转 {stall_count} 次后强制进入 EXPLOIT，尝试利用"
+            })
+            
             await self._trigger_think(force=True)
             return
 
-        # stall 耗尽 → 清理退出
+        # 条件4: stall 耗尽 → 清理退出
         if stall_count >= max_stall:
             await self.event_bus.publish(Event(
                 type=EventType.CLEANUP_STATE,
@@ -993,3 +1080,23 @@ class Orchestrator:
                 source="orchestrator",
                 payload={"reason": "stall_exhausted"}
             ))
+            return
+
+    async def _inject_bypass_task(self, target: str):
+        """自动注入 403 绕过任务"""
+        mutation = StateMutation(
+            operation=MutationOperation.WRITE,
+            domain=StateDomain.PENDING_RECON,
+            payload={
+                "id":         str(uuid.uuid4()),
+                "target":     target,
+                "tool":       "dir_enum",
+                "params":     {"profile": "bypass", "wordlist": "common_bypass.txt"},
+                "priority":   0.9,
+                "noise_cost": 3,
+                "is_async":   True,
+                "rationale":  "自动探测: 检测到 403 Forbidden，尝试目录爆破寻找绕过路径",
+                "status":     TaskStatus.PENDING,
+            }
+        )
+        await self.state_api.apply_mutation(mutation)

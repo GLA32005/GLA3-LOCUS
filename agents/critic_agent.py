@@ -71,6 +71,7 @@ _CRITIC_SYSTEM = """\
 - noise:           EDR 遥测触发量。0=几乎无日志；1=多条高保真告警。
 - stability:       沙箱语法成功率。0=必定报错/崩溃；1=稳定可执行。
 - destructiveness: DoS/破坏性风险。0=完全安全；1=会造成数据丢失或服务中断。
+    【极度重要】破坏性仅指：永久性数据删除、破坏系统配置、导致系统崩溃或拒绝服务（DoS）。像读取文件、下载工具(curl/wget)、执行爆破(hydra/ssh)等操作，不管有多敏感或非法，其 destructiveness 必须小于 0.3。高噪音不等于高破坏性！
 - compliance:      目标合规性。0=目标在 scope 之外；1=目标完全在授权范围内。
 
 ## 严格规则
@@ -112,7 +113,7 @@ class CriticAgent(BaseAgent):
     def __init__(self, model: str = "Qwen3.5-9B-MLX-8bit", 
                  api_key: str = None, base_url: str = None):
         super().__init__(AgentType.CRITIC)
-        self.api_key = api_key or "Ww131421"
+        self.api_key = api_key
         self.base_url = base_url or "http://127.0.0.1:8866"
         self.client = AsyncAnthropic(api_key=self.api_key, base_url=self.base_url)
         self.model = model
@@ -126,7 +127,7 @@ class CriticAgent(BaseAgent):
         target          = payload.get("target", "")
         vector_type     = payload.get("vector_type", "UNKNOWN")
         retry_count     = int(payload.get("retry_count", 0))
-        mission_scope   = payload.get("mission_scope") or mission.get("scope", [])
+        mission_scope   = mission.get("scope_expanded", mission.get("scope", []))
         risk_level      = int(mission.get("risk_level", 3))
 
         if not payload_id:
@@ -237,7 +238,7 @@ class CriticAgent(BaseAgent):
         lines.append(f"**向量类型**: {payload.get('vector_type', '未知')}")
         lines.append(f"**技术**: {payload.get('technique', '未知')}\n")
 
-        scope = payload.get("mission_scope") or mission.get("scope", [])
+        scope = mission.get("scope_expanded", mission.get("scope", []))
         lines.append(f"**授权范围 (scope)**: {scope}")
         lines.append(f"**任务风险等级**: {mission.get('risk_level', 3)}/5\n")
 
@@ -293,7 +294,15 @@ class CriticAgent(BaseAgent):
         stab  = float(scores.get("stability", 1.0))
         noise = float(scores.get("noise", 0.0))
 
-        if dos > _DOS_THRESHOLD:
+        # DoS 风险判定：如果 risk_level 较高 (>=4)，对爆破等操作适当放宽阈值
+        dos_limit = _DOS_THRESHOLD
+        if risk_level >= 3:
+            # 即使是中等风险等级，也允许轻量级的 Web 探测 (0.7 左右)
+            dos_limit = 0.75
+        if risk_level >= 4:
+            dos_limit = 0.85  # 高风险任务下允许更具攻击性的操作
+            
+        if dos > dos_limit:
             return PayloadStatus.BLOCKED, RejectReason.DOS_RISK
 
         if comp < _COMPLIANCE_THRESHOLD:
@@ -455,4 +464,7 @@ class CriticAgent(BaseAgent):
                 for cidr in scope
             )
         except ValueError:
-            return True  # 域名放行，Executor 侧再验证
+            # 域名直接匹配
+            if ip_str in scope:
+                return True
+            return False

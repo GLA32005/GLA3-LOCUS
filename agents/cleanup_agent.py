@@ -116,7 +116,7 @@ class CleanupAgent(BaseAgent):
 
     def __init__(self, api_key: str = None, base_url: str = None):
         super().__init__(AgentType.CLEANUP)
-        self.api_key = api_key or "Ww131421"
+        self.api_key = api_key
         self.base_url = base_url or "http://127.0.0.1:8866"
         self._client = AsyncAnthropic(api_key=self.api_key, base_url=self.base_url)
 

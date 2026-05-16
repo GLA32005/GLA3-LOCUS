@@ -1,32 +1,39 @@
-import logging
-import httpx
+"""
+LLM Provider — 统一 LLM 访问适配层
+针对 Anthropic 风格接口（如 Claude, Qwen-OMLX）的封装。
+"""
+
 import json
+import logging
 import re
+import httpx
+from core.protocols import KnowledgeQueryType
 
 logger = logging.getLogger(__name__)
 
-def parse_robust_json(raw: str) -> dict | list | None:
+def parse_robust_json(raw_text: str):
     """
-    从 LLM 输出中鲁棒地提取并解析 JSON。
-    支持：
-    1. 自动剥离 Markdown 代码块
-    2. 正则匹配最外层 {} 或 []
-    3. 启发式修复未闭合的引号或括号（通常由 token 截断引起）
+    极度鲁棒的 JSON 提取器：
+    1. 处理 Markdown 代码块包裹
+    2. 处理前后废话
+    3. 启发式修复未闭合括号或引号
+    4. 针对 Qwen 等模型在 think 字段包含换行的场景进行了优化
     """
-    if not raw or not raw.strip():
+    if not raw_text:
         return None
-
-    # 1. 剥离可能存在的 Markdown 标记
-    clean_raw = raw.strip()
-    if clean_raw.startswith("```"):
-        # 寻找第一个 { 或 [
-        start_idx = min(
-            clean_raw.find("{") if "{" in clean_raw else len(clean_raw),
-            clean_raw.find("[") if "[" in clean_raw else len(clean_raw)
-        )
-        # 寻找最后一个 } 或 ]
-        end_idx = max(
-            clean_raw.rfind("}") if "}" in clean_raw else -1,
+    
+    clean_raw = raw_text.strip()
+    
+    # 1. 处理 Markdown 代码块
+    if "```json" in clean_raw:
+        json_match = re.search(r"```json\s*(\{.*\}|\[.*\])\s*```", clean_raw, re.DOTALL)
+        if json_match:
+            clean_raw = json_match.group(1).strip()
+    elif "```" in clean_raw:
+        # 有些模型不写 json 关键字
+        start_idx = clean_raw.find("{") if "{" in clean_raw else clean_raw.find("[")
+        end_idx = (
+            clean_raw.rfind("}") if "}" in clean_raw else 
             clean_raw.rfind("]") if "]" in clean_raw else -1
         )
         if 0 <= start_idx < end_idx:
@@ -38,30 +45,57 @@ def parse_robust_json(raw: str) -> dict | list | None:
         clean_raw = json_match.group(1).strip()
 
     try:
-        return json.loads(clean_raw)
+        # strict=False 允许字符串包含控制字符（如未转义的换行符）
+        return json.loads(clean_raw, strict=False)
     except json.JSONDecodeError:
-        # 3. 启发式修复（补齐截断）
+        # 3. 启发式修复（补齐截断或修复格式错误）
         try:
-            tmp = clean_raw
-            # 补齐未闭合引号（简单计数，不处理复杂转义）
+            # A. 尝试修复字符串中未转义的换行
+            tmp = re.sub(r'([^\\])\n', r'\1\\n', clean_raw)
+            
+            # B. 尝试修复字符串中未转义的双引号 (Issue 4)
+            # 针对 "key": "value" 结构中 value 包含未转义引号的情况
+            # 我们匹配 "key": " ... " 且后面跟着 , 或 } 的情况
+            tmp = re.sub(r'("[\w_]+"\s*:\s*")(.*?)("(?=\s*[,\}]))', 
+                         lambda m: m.group(1) + m.group(2).replace('"', '\\"') + m.group(3), 
+                         tmp, flags=re.DOTALL)
+
+            try:
+                return json.loads(tmp, strict=False)
+            except:
+                pass
+
+            # C. 补齐未闭合引号和括号
+            # 补齐未闭合引号
             if tmp.count('"') % 2 != 0:
                 tmp += '"'
             
-            # 补齐未闭合括号
+            # 补齐未闭合括号 (考虑字符串内部情况)
             brackets = {"{": "}", "[": "]"}
             stack = []
-            for char in tmp:
-                if char in brackets.keys():
-                    stack.append(char)
-                elif char in brackets.values():
-                    if stack and brackets[stack[-1]] == char:
-                        stack.pop()
+            in_string = False
+            escape = False
             
-            # 逆序补全
+            for char in tmp:
+                if char == '"' and not escape:
+                    in_string = not in_string
+                elif char == '\\' and in_string:
+                    escape = not escape
+                    continue
+                
+                if not in_string:
+                    if char in brackets.keys():
+                        stack.append(char)
+                    elif char in brackets.values():
+                        if stack and brackets[stack[-1]] == char:
+                            stack.pop()
+                
+                escape = False
+            
             while stack:
                 tmp += brackets[stack.pop()]
                 
-            return json.loads(tmp)
+            return json.loads(tmp, strict=False)
         except Exception:
             return None
 
@@ -74,8 +108,10 @@ async def call_llm_anthropic_style(
     max_tokens: int = 1500
 ) -> tuple[str, int]:
     """
-    使用原生 httpx 直接请求本地 LLM 接口（绕过 SDK 可能存在的认证或 Header 冲突）。
+    使用原生 httpx 直接请求本地 LLM 接口，包含指数退避重试机制。
     """
+    import asyncio
+    
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
@@ -89,171 +125,74 @@ async def call_llm_anthropic_style(
     }
     
     url = f"{base_url.rstrip('/')}/v1/messages"
+    max_retries = 3
     
-    try:
-        async with httpx.AsyncClient(trust_env=False) as client:
-            response = await client.post(
-                url, 
-                json=payload, 
-                headers=headers, 
-                timeout=180.0
-            )
-        
-        if response.status_code != 200:
-            logger.error(f"LLM Provider: 请求失败 {response.status_code} - {response.text}")
-            return "", 0
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=180.0, trust_env=False) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                if resp.status_code == 429:
+                    wait_time = 2 ** attempt
+                    logger.warning(f"LLM 速率限制 (429)，等待 {wait_time}s 后重试...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                
+                resp.raise_for_status()
+                data = resp.json()
+                
+                text = ""
+                thinking = ""
+                for block in data.get("content", []):
+                    if block.get("type") == "text":
+                        text += block.get("text", "")
+                    elif block.get("type") == "thinking":
+                        thinking += block.get("thinking", "")
+                
+                if not text.strip() and thinking:
+                    text = thinking
+                    
+                tokens = data.get("usage", {}).get("total_tokens", 0)
+                return text, tokens
+                
+        except (httpx.HTTPError, KeyError) as e:
+            if attempt == max_retries - 1:
+                logger.error(f"LLM 调用在 {max_retries} 次重试后失败: {e}")
+                return "", 0
+            wait_time = 1.0 * (attempt + 1)
+            logger.warning(f"LLM 调用失败: {e}，正在进行第 {attempt+1} 次重试...")
+            await asyncio.sleep(wait_time)
             
-        data = response.json()
-        
-        # 提取文本和思维链
-        text = ""
-        thinking = ""
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                text += block.get("text", "")
-            if block.get("type") == "thinking":
-                thinking += block.get("thinking", "")
-        
-        # 如果 text 为空但有思维链，尝试从思维链里捞
-        if not text.strip() and thinking:
-            text = thinking
-            
-        tokens = data.get("usage", {}).get("total_tokens", 0)
-        return text, tokens
+    return "", 0
 
-    except Exception as e:
-        logger.error(f"LLM Provider: 发生异常: {e}")
-        return "", 0
-
-
-# ── Vision 能力检测 ────────────────────────────────────────
-
-_vision_supported: bool | None = None  # 缓存，只检测一次
-
+# ── Vision 能力检测 ──
+# 移除了全局变量缓存，由调用方管理状态以避免污染
 
 async def check_vision_support(
     api_key: str, base_url: str, model: str
 ) -> bool:
-    """
-    探测当前模型是否支持 Vision（多模态图片输入）。
-    发送一个最小的带图片消息，根据响应判断。
-    结果缓存，只检测一次。
-    """
-    global _vision_supported
-    if _vision_supported is not None:
-        return _vision_supported
-
-    # 1x1 白色 PNG（最小有效图片）
-    tiny_png_b64 = (
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
-        "nGP4z8BQDwAEgAF/pooBPQAAAABJRU5ErkJggg=="
-    )
-
+    """探测当前模型是否支持 Vision"""
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
+        "content-type": "application/json"
     }
+    # 发送一个最小的带图片消息测试
     payload = {
         "model": model,
-        "max_tokens": 50,
+        "max_tokens": 10,
         "messages": [{
-            "role": "user",
+            "role": "user", 
             "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": tiny_png_b64,
-                    },
-                },
-                {"type": "text", "text": "Describe this image in one word."},
-            ],
-        }],
+                {"type": "text", "text": "Is this an image?"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="}}
+            ]
+        }]
     }
-
+    
     url = f"{base_url.rstrip('/')}/v1/messages"
     try:
-        async with httpx.AsyncClient(trust_env=False) as client:
-            response = await client.post(
-                url, json=payload, headers=headers, timeout=30.0
-            )
-        if response.status_code == 200:
-            _vision_supported = True
-            logger.info("LLM Provider: Vision 支持 ✅")
-        else:
-            _vision_supported = False
-            logger.info(
-                f"LLM Provider: Vision 不支持 ❌ (status={response.status_code})"
-            )
-    except Exception as e:
-        _vision_supported = False
-        logger.info(f"LLM Provider: Vision 检测失败，默认关闭: {e}")
-
-    return _vision_supported
-
-
-async def call_llm_with_vision(
-    api_key: str,
-    base_url: str,
-    model: str,
-    system: str,
-    prompt: str,
-    image_b64: str,
-    image_media_type: str = "image/png",
-    max_tokens: int = 1500,
-) -> tuple[str, int]:
-    """
-    带图片的 LLM 调用。仅在 check_vision_support() 返回 True 时使用。
-    """
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": image_media_type,
-                        "data": image_b64,
-                    },
-                },
-                {"type": "text", "text": prompt},
-            ],
-        }],
-    }
-
-    url = f"{base_url.rstrip('/')}/v1/messages"
-    try:
-        async with httpx.AsyncClient(trust_env=False) as client:
-            response = await client.post(
-                url, json=payload, headers=headers, timeout=180.0
-            )
-
-        if response.status_code != 200:
-            logger.error(
-                f"LLM Vision: 请求失败 {response.status_code}"
-            )
-            return "", 0
-
-        data = response.json()
-        text = ""
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                text += block.get("text", "")
-        tokens = data.get("usage", {}).get("total_tokens", 0)
-        return text, tokens
-
-    except Exception as e:
-        logger.error(f"LLM Vision: 异常: {e}")
-        return "", 0
-
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            return resp.status_code == 200
+    except:
+        return False

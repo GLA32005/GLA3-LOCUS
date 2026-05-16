@@ -157,6 +157,7 @@ _RECON_TOOL_MAP = {
     "port_scan":       NmapTool,
     "port_scan_full":  NmapTool,
     "service_enum":    NmapTool,
+    "udp_scan":       NmapTool,
     # Nuclei
     "vuln_scan":       NucleiTool,
     "nuclei":          NucleiTool,
@@ -164,6 +165,7 @@ _RECON_TOOL_MAP = {
     "banner_grab":     BannerGrabTool,
     "http_probe":      HttpxTool,
     "dir_enum":        DirEnumTool,
+    "auth_test_anon":  BannerGrabTool,  # Hallucination mapping: 匿名登录探测映射到 BannerGrab (包含基础测试)
     "smb_enum":        SmbEnumTool,
     "ldap_enum":       LdapEnumTool,
     "cred_spray":      CredSprayTool,
@@ -198,7 +200,7 @@ class Executor:
         """从 Redis 加载 mission scope，带缓存"""
         if not self._mission_scope:
             mission = await self.state_api.get_mission()
-            self._mission_scope = mission.get("scope", [])
+            self._mission_scope = mission.get("scope_expanded", mission.get("scope", []))
         return self._mission_scope
 
     def _is_in_scope(self, target: str, scope: list[str]) -> bool:
@@ -214,7 +216,9 @@ class Executor:
                 for cidr in scope
             )
         except ValueError:
-            # 域名目标一律拒绝，不进行 DNS 解析
+            # 域名或 CIDR 网段直接匹配
+            if ip_str in scope:
+                return True
             return False
 
     # ════════════════════════════════════════════════════════════
@@ -405,6 +409,18 @@ class Executor:
 
         # ── 完成 ─────────────────────────────────────────────
         await self._update_recon_status(task_id, TaskStatus.DONE)
+        
+        # 智能截断 raw 数据，防止日志被 Base64 塞爆
+        raw_display = {}
+        if isinstance(tool_result.raw, dict):
+            for k, v in tool_result.raw.items():
+                if isinstance(v, str) and len(v) > 200:
+                    raw_display[k] = v[:200] + "... [TRUNCATED]"
+                else:
+                    raw_display[k] = v
+        else:
+            raw_display = str(tool_result.raw)[:300]
+
         await self.event_bus.publish(
             Event.task_completed(
                 task_id=task_id,
@@ -414,7 +430,8 @@ class Executor:
                     "assets_found":  len(tool_result.assets),
                     "info_gain":     tool_result.info_gain,
                     "duration_ms":   tool_result.duration_ms,
-                    "raw_summary":   str(tool_result.raw)[:300],
+                    "status":        str(tool_result.raw.get("status", "")),
+                    "raw_summary":   str(raw_display),
                 },
             )
         )
@@ -745,9 +762,36 @@ class Executor:
         ))
 
     async def _upsert_asset(self, asset: dict):
-        """将发现的资产写入 Neo4j assets 图谱。"""
-        if not asset.get("ip"):
+        """将发现的资产写入 Neo4j assets 图谱（含归一化）。"""
+        ip_or_domain = asset.get("ip")
+        if not ip_or_domain:
             return
+
+        # ── 归一化逻辑 (Issue 3) ──
+        # 如果是域名，尝试解析为 IP，确保 Neo4j 中 Host 节点唯一
+        resolved_ip = ip_or_domain
+        domain_alias = None
+
+        import ipaddress
+        try:
+            ipaddress.ip_address(ip_or_domain)
+        except ValueError:
+            # 不是 IP，尝试解析
+            domain_alias = ip_or_domain
+            import socket
+            try:
+                # 优先解析为 IP，确保 hosts 计数准确
+                resolved_ip = socket.gethostbyname(ip_or_domain)
+                logger.debug(f"Executor: 资产归一化 {domain_alias} -> {resolved_ip}")
+            except Exception as e:
+                logger.warning(f"Executor: 域名解析失败 {domain_alias}: {e}")
+                # 解析失败仍保留域名作为 key (不推荐但作为保底)
+                resolved_ip = domain_alias
+
+        asset["ip"] = resolved_ip
+        if domain_alias and domain_alias != resolved_ip:
+            asset["domain"] = domain_alias  # 存入属性
+
         await self.state_api.apply_mutation(StateMutation(
             operation=MutationOperation.UPSERT,
             domain=StateDomain.ASSETS,
@@ -827,6 +871,15 @@ class Executor:
                 rationale=f"自动派发: 发现 HTTP 服务 {app}:{port}，触发截图分析",
                 is_async=False,
                 noise_cost=1,
+            )
+
+            # 自动注入 dir_enum (feroxbuster)
+            await self._inject_auto_task(
+                target=target,
+                tool="dir_enum",
+                rationale=f"自动派发: 发现 HTTP 服务 {app}:{port}，触发目录爆破",
+                is_async=True,
+                noise_cost=2,
             )
 
     async def _inject_auto_task(

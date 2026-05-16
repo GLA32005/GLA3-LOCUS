@@ -106,6 +106,7 @@ class EventType(str, Enum):
     CLEANUP_STATE       = "CLEANUP_STATE"
     TASK_TIMEOUT        = "TASK_TIMEOUT"
     HUMAN_APPROVAL_REQ  = "HUMAN_APPROVAL_REQ"
+    TARGET_UNREACHABLE  = "TARGET_UNREACHABLE"
 
 
 # ════════════════════════════════════════════════════════════

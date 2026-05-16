@@ -22,6 +22,7 @@ _SCAN_ARGS: dict[str, list[str]] = {
     "port_scan":      ["-sV", "--open", "--top-ports", "1000", "-T4"],
     "port_scan_full": ["-sV", "--open", "-p-", "-T3"],
     "service_enum":   ["-sV", "-sC", "--open", "-T4"],   # 带默认脚本
+    "udp_scan":       ["-sU", "-sV", "--open", "--top-ports", "50", "-T4"],
     "default":        ["-sV", "--open", "--top-ports", "1000", "-T4"],
 }
 

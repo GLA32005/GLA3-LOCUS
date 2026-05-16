@@ -98,8 +98,15 @@ else:
 def _build_clickhouse():
     try:
         from clickhouse_driver import Client
-        return Client(host=CH_HOST, port=CH_PORT, database=CH_DATABASE)
+        # 使用连接池 (Pool) 或至少增加设置以处理并发
+        # clickhouse_driver.Client 默认不支持多线程，但我们可以增加 settings
+        return Client(
+            host=CH_HOST, port=CH_PORT, database=CH_DATABASE,
+            settings={"max_threads": 8, "max_block_size": 100000}
+        )
     except Exception as e:
+        logger.error(f"ClickHouse 连接失败: {e}")
+        return None
         logger.error(f"ClickHouse 连接失败: {e}")
         raise
 
@@ -132,13 +139,36 @@ async def _init_state_api() -> StateAPI:
 
 
 async def _load_mission_into_state(state_api: StateAPI, mission: dict):
-    """将 mission dict 写入 Redis，每次启动强制覆盖以确保 YAML 变更生效"""
+    """将 mission dict 写入 Redis，并自动展开域名 scope"""
     import json
+    import socket
+    
+    # 自动展开域名 scope -> IP
+    scope = mission.get("scope", [])
+    resolved_scope = list(scope)
+    for entry in scope:
+        if "/" not in entry: # 不是 CIDR
+            try:
+                import ipaddress
+                ipaddress.ip_address(entry)
+            except ValueError:
+                # 是域名，尝试解析
+                try:
+                    _, _, ips = socket.gethostbyname_ex(entry)
+                    for ip in ips:
+                        if ip not in resolved_scope:
+                            resolved_scope.append(ip)
+                    logger.info(f"Main: 域名解析 {entry} -> {ips}")
+                except Exception as e:
+                    logger.warning(f"Main: 域名解析失败 {entry}: {e}")
+    
+    mission["scope_expanded"] = resolved_scope
+    
     existing = await state_api.redis.get("mission")
     if existing:
         logger.info("StateAPI: 覆盖旧 mission 配置")
     await state_api.redis.set("mission", json.dumps(mission))
-    logger.info(f"StateAPI: mission loaded (scope={mission.get('scope')})")
+    logger.info(f"StateAPI: mission loaded (scope={mission.get('scope')}, expanded_len={len(resolved_scope)})")
 
 
 async def _clean_all_state(state_api: StateAPI):

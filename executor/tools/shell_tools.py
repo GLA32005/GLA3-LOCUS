@@ -58,12 +58,25 @@ class BannerGrabTool(BaseTool):
                 proc.communicate(b"\r\n\r\n"), timeout=timeout + 2
             )
             duration_ms = int((time.time() - t0) * 1000)
-            banner = (stdout.decode(errors="replace") +
-                      stderr.decode(errors="replace")).strip()[:500]
+            raw_banner = (stdout.decode(errors="replace") +
+                          stderr.decode(errors="replace")).strip()[:500]
+
+            # ── 过滤无效指纹 (Issue 2) ──
+            # 如果结果包含超时、拒绝连接等错误信息，不应视为有效资产
+            _FAIL_PATTERNS = [
+                "Ncat: TIMEOUT", "Connection refused", "No route to host",
+                "Connection timed out", "Network is unreachable"
+            ]
+            banner = raw_banner
+            is_valid = bool(banner)
+            if is_valid and any(p in raw_banner for p in _FAIL_PATTERNS):
+                logger.debug(f"BannerGrabTool: 检测到网络错误指纹 '{raw_banner[:50]}...'，标记为无效")
+                is_valid = False
+                banner = ""
 
             return ToolResult(
-                success=bool(banner),
-                raw={"banner": banner, "port": port},
+                success=is_valid,
+                raw={"banner": raw_banner, "port": port},
                 assets=[{
                     "ip": ip,
                     "services": [{
@@ -71,8 +84,8 @@ class BannerGrabTool(BaseTool):
                         "state": "open", "banner": banner[:200],
                         "app": "", "version": "",
                     }],
-                }] if banner else [],
-                info_gain=0.4 if banner else 0.1,
+                }] if is_valid else [],
+                info_gain=0.4 if is_valid else 0.1,
                 duration_ms=duration_ms,
             )
         except asyncio.TimeoutError:
