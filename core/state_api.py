@@ -11,6 +11,9 @@ from enum import Enum
 import redis.asyncio as redis
 from neo4j import GraphDatabase
 import asyncio
+import logging
+
+logger = logging.getLogger("StateAPI")
 
 from .protocols import (
     StateMutation, StateDomain, MutationOperation,
@@ -123,11 +126,25 @@ class StateAPI:
 
     # set_mission 被移除以强制执行“约束①：mission 运行时只读”
 
+    async def extend_deadline(self, extra_seconds: int):
+        """允许延长任务执行的绝对时间限制，但不允许修改目标"""
+        mission = await self.get_mission()
+        if mission:
+            mission["max_runtime_seconds"] = mission.get("max_runtime_seconds", 7200) + extra_seconds
+            await self.redis.set("mission", json_dumps(mission))
+
     async def load_mission(self, mission: dict):
         """仅启动时调用一次，后续不可修改"""
         if await self.redis.exists("mission"):
             raise PermissionError("mission 已加载，运行时不可修改（约束①）")
         await self.redis.set("mission", json_dumps(mission))
+        
+    async def close(self):
+        """关闭所有外部连接"""
+        if hasattr(self, 'redis'):
+            await self.redis.close()
+        if hasattr(self, 'neo4j'):
+            self.neo4j.close()
 
     # ── focus 读写 ────────────────────────────────────────────
 
@@ -227,6 +244,59 @@ class StateAPI:
             RETURN count(h) as cnt
         """)
         return records[0]["cnt"] if records else 0
+
+    async def add_unreachable_target(self, target: str):
+        if target:
+            await self.redis.sadd("unreachable_targets", target)
+
+    async def is_unreachable(self, target: str) -> bool:
+        if not target:
+            return False
+        return bool(await self.redis.sismember("unreachable_targets", target))
+
+    async def get_unreachable_targets(self) -> set[str]:
+        return await self.redis.smembers("unreachable_targets")
+
+    async def set_sandbox_degraded(self, is_degraded: bool, reason: str = ""):
+        """C1b 修复：记录沙箱降级状态到 Redis"""
+        await self.redis.hset("sandbox_status", mapping={
+            "is_degraded": "1" if is_degraded else "0",
+            "reason": reason,
+        })
+
+    async def get_sandbox_status(self) -> dict:
+        """读取沙箱降级状态"""
+        raw = await self.redis.hgetall("sandbox_status")
+        return {
+            "is_degraded": raw.get("is_degraded", "0") == "1",
+            "reason": raw.get("reason", ""),
+        }
+
+    async def verify_vector_counts_consistency(self):
+        """启动自检：核验 ClickHouse 审计表与 Redis 运行时计数的一致性"""
+        try:
+            # A1 修复：确保 fail_reason 列为 String 类型（兼容旧 Enum8 表）
+            try:
+                await self._run_ch(
+                    "ALTER TABLE tried_vectors MODIFY COLUMN fail_reason String"
+                )
+                logger.info("ClickHouse: fail_reason 列已迁移为 String 类型")
+            except Exception as e:
+                if "Nothing to do" not in str(e) and "already" not in str(e).lower():
+                    logger.warning(f"ClickHouse fail_reason 迁移跳过: {e}")
+
+            ch_summary = await self.get_vectors_summary()
+            ch_total = ch_summary.get("total", 0)
+            redis_payloads = await self.redis.scard("idx:payload_ids")
+            redis_recon = await self.redis.scard("idx:recon_task_ids")
+            redis_total = redis_payloads + redis_recon
+            
+            logger.info(f"StateAPI 一致性自检: ClickHouse 历史记录总计={ch_total} 条, Redis 队列总计={redis_total} 项 (payloads={redis_payloads}, recon={redis_recon})")
+            
+            if redis_total > 0 and ch_total == 0:
+                logger.warning("❗ 异常状态警告：Redis 中存有活动任务队列，但 ClickHouse 的 tried_vectors 审计表为空！历史执行数据可能已丢失或未同步。")
+        except Exception as e:
+            logger.error(f"StateAPI 一致性自检异常: {e}")
 
     def _write_cypher_sync(self, query: str, **params):
         with self.neo4j.session() as session:
@@ -369,8 +439,39 @@ class StateAPI:
 
     # ── 内部写入方法 ──────────────────────────────────────────
 
+    def _is_ip(self, text: str) -> bool:
+        import ipaddress
+        try:
+            ipaddress.ip_address(text)
+            return True
+        except ValueError:
+            return False
+
+    async def _resolve_to_ip(self, domain: str) -> Optional[str]:
+        import socket
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(None, socket.gethostbyname, domain)
+        except Exception:
+            return None
+
     async def _apply_assets(self, mutation: StateMutation):
         p = dict(mutation.payload)  # 浅拷贝，避免修改调用方的 dict
+        
+        # 如果是域名，尝试解析成 IP 以合并资产
+        original_ip = p.get("ip", "")
+        if original_ip and not self._is_ip(original_ip):
+            resolved = await self._resolve_to_ip(original_ip)
+            if resolved:
+                existing = await self.get_host_full(resolved)
+                if existing:
+                    # 合并别名
+                    aliases = set(existing["host"].get("aliases", []))
+                    aliases.add(original_ip)
+                    p["aliases"] = list(aliases)
+                else:
+                    p["aliases"] = [original_ip]
+                p["ip"] = resolved
         if mutation.operation == MutationOperation.UPSERT:
             # 将嵌套列表从 Host props 中分离出来（Neo4j 不支持嵌套 list）
             services = p.pop("services", [])
@@ -426,15 +527,24 @@ class StateAPI:
     async def _apply_tried_vectors(self, mutation: StateMutation):
         """只追加，永不修改（约束②）"""
         p = mutation.payload
+        v_type = p.get("type", "UNKNOWN")
+        if hasattr(v_type, "value"): v_type = v_type.value
+        v_result = p.get("result", "UNKNOWN")
+        if hasattr(v_result, "value"): v_result = v_result.value
+        v_fail = p.get("fail_reason", "UNKNOWN")
+        if hasattr(v_fail, "value"): v_fail = v_fail.value
+        elif not v_fail: v_fail = "UNKNOWN"
+        else: v_fail = str(v_fail)
+
         await self._run_ch(
             "INSERT INTO tried_vectors VALUES",
             [(
                 p.get("id", str(__import__("uuid").uuid4())),
                 p.get("target", ""),
-                p.get("type", "UNKNOWN"),
+                v_type,
                 p.get("payload", ""),
-                p.get("result", "UNKNOWN"),
-                p.get("fail_reason", "UNKNOWN"),
+                v_result,
+                v_fail,
                 p.get("info_gain", 0.0),
                 p.get("novelty", 1.0),
                 p.get("retry_count", 0),

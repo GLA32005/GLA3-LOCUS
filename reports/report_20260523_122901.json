@@ -1,13 +1,13 @@
 {
-  "generated_at": "2026-05-13T04:28:01.135516+00:00",
+  "generated_at": "2026-05-23T12:29:01.092688+00:00",
   "mission": {
     "goal": "获取内网核心数据库服务器权限",
     "scope": [
-      "192.168.1.0/29"
+      "shop.10086.cn"
     ],
     "risk_level": 3
   },
-  "executive_summary": "对 192.168.1.0/29 执行了 0 次攻击尝试，成功 0 次（N/A）。共发现 3 台主机，攻破 0 台。清理覆盖率：N/A。",
+  "executive_summary": "对 shop.10086.cn 执行了 0 次攻击尝试，成功 0 次（N/A）。共发现 1 台主机，攻破 0 台。清理覆盖率：N/A。",
   "findings": [],
   "cleanup_verification": {
     "total_footprints": 0,
@@ -24,45 +24,24 @@
     "abandoned_count": 0,
     "success_rate": "N/A",
     "avg_info_gain": NaN,
-    "total_hosts": 3,
+    "total_hosts": 1,
     "owned_hosts": 0,
     "hallucination_count": 0,
     "recommendation": "EXPLORE"
   },
   "assets_summary": [
     {
-      "ip": "192.168.1.1",
+      "ip": "198.18.0.30",
       "access_level": "NONE",
       "os": "Unknown",
-      "out_of_scope": null,
+      "out_of_scope": true,
       "open_ports": [
-        445,
+        8080,
+        5432,
+        3306,
         443,
-        139,
         80,
-        23
-      ]
-    },
-    {
-      "ip": "192.168.1.3",
-      "access_level": null,
-      "os": null,
-      "out_of_scope": null,
-      "open_ports": [
-        443,
-        80
-      ]
-    },
-    {
-      "ip": "192.168.1.5",
-      "access_level": "NONE",
-      "os": "Unknown",
-      "out_of_scope": null,
-      "open_ports": [
-        9000,
-        8086,
-        3000,
-        53
+        1
       ]
     }
   ],

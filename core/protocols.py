@@ -51,6 +51,10 @@ class FailReason(str, Enum):
     DOS_RISK            = "DOS_RISK"
     SYNTAX_ERROR        = "SYNTAX_ERROR"
     HIGH_NOISE          = "HIGH_NOISE"
+    EXECUTION_FAILED    = "EXECUTION_FAILED"
+    NETWORK_UNREACHABLE = "NETWORK_UNREACHABLE"
+    AUTH_FAILED         = "AUTH_FAILED"
+    SERVICE_NOT_FOUND   = "SERVICE_NOT_FOUND"
     UNKNOWN             = "UNKNOWN"
 
 

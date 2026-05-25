@@ -8,7 +8,7 @@ mission:
 
   # 授权范围 CIDR（严格限制，越界自动拒绝）
   scope:
-    - "192.168.1.0/29"
+    - "shop.10086.cn"
 
   # 明确禁止的目标（Out of Bounds）
   oob:
@@ -47,5 +47,5 @@ mission:
   # Think 轮次上限（达到后强制生成报告并结束）
   max_think_rounds: 200
 
-  # 最大运行时间（秒，达到后强制结束，默认 1 小时）
-  max_runtime_seconds: 3600
+  # 最大运行时间（秒，达到后强制结束，默认 2 小时）
+  max_runtime_seconds: 7200

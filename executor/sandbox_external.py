@@ -71,6 +71,19 @@ class ExternalSandbox:
 
     def __init__(self):
         self._docker_available = self._check_docker()
+        if not self._docker_available:
+            logger.warning("❗ 高危警告：未检测到 Docker 沙箱环境！ExternalSandbox 语法验证与破坏性检查将完全降级为基础静态匹配，系统防御力显著受损！")
+
+    @property
+    def is_degraded(self) -> bool:
+        """C1a 修复：暴露沙箱降级状态"""
+        return not self._docker_available
+
+    @property
+    def degraded_reason(self) -> str:
+        if not self._docker_available:
+            return "Docker 不可用，仅执行静态模式匹配"
+        return ""
 
     def _check_docker(self) -> bool:
         import shutil
@@ -96,8 +109,8 @@ class ExternalSandbox:
 
         # ── Docker 语法检查 ──────────────────────────────────
         if not self._docker_available:
-            logger.warning("ExternalSandbox: Docker 不可用，跳过容器检查，仅静态通过")
-            return SandboxResult(passed=True, reason="static_only")
+            logger.warning("❗ ExternalSandbox: Docker 不可用，跳过容器检查，仅以静态匹配通过 (degraded_security)")
+            return SandboxResult(passed=True, reason="static_only: degraded_security")
 
         return await self._run_in_docker(content, executor_hint)
 
@@ -151,12 +164,12 @@ class ExternalSandbox:
                 "Cannot connect to the Docker daemon",
             )):
                 logger.warning(
-                    f"ExternalSandbox: Docker 基础设施失败 "
-                    f"(exit={proc.returncode})，降级为静态通过"
+                    f"❗ ExternalSandbox: Docker 基础设施验证失败 "
+                    f"(exit={proc.returncode}, err={stderr_str[:100]})，沙箱防护降级为静态通过"
                 )
                 return SandboxResult(
                     passed=True,
-                    reason=f"docker_infra_passthrough: exit={proc.returncode}",
+                    reason=f"docker_infra_passthrough: exit={proc.returncode} degraded_security",
                 )
 
             passed = proc.returncode == 0

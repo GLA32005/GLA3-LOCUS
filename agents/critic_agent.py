@@ -13,8 +13,6 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from anthropic import AsyncAnthropic
-
 from core.protocols import (
     AgentType,
     BaseAgent,
@@ -82,6 +80,12 @@ _CRITIC_SYSTEM = """\
 5. 当 verdict=BLOCKED 时，reject_reason 必须填写对应枚举值
 6. 当你无法确定某项风险时，宁可评分偏高（保守原则）
 
+## 评分示例（calibration）
+- curl 下载文件: destructiveness=0.0（只读操作）
+- SSH 暴力破解: destructiveness=0.1（认证尝试，不修改目标状态）
+- 写 crontab 反弹 shell: destructiveness=0.3（持久化但可逆）
+- rm -rf /: destructiveness=1.0（不可恢复的数据破坏）
+
 ## 输出格式
 {
   "think":    "评审推理（≤80字）",
@@ -115,8 +119,6 @@ class CriticAgent(BaseAgent):
         super().__init__(AgentType.CRITIC)
         self.api_key = api_key
         self.base_url = base_url or "http://127.0.0.1:8866"
-        self.client = AsyncAnthropic(api_key=self.api_key, base_url=self.base_url)
-        self.model = model
 
     async def run(self, input: NodeInput) -> NodeOutput:
         payload = input.state_view.get("payload", {})
@@ -129,6 +131,10 @@ class CriticAgent(BaseAgent):
         retry_count     = int(payload.get("retry_count", 0))
         mission_scope   = mission.get("scope_expanded", mission.get("scope", []))
         risk_level      = int(mission.get("risk_level", 3))
+
+        # C1c 修复：检测沙箱降级状态，动态收紧 stability 阈值
+        sandbox_status = input.state_view.get("sandbox_status", {})
+        self._sandbox_degraded = sandbox_status.get("is_degraded", False)
 
         if not payload_id:
             logger.error("CriticAgent: state_view 中无有效 payload，跳过")
@@ -253,26 +259,43 @@ class CriticAgent(BaseAgent):
 
     async def _call_llm(self, prompt: str) -> tuple[dict | None, int]:
         try:
-            from core.llm_provider import call_llm_anthropic_style
-            raw, tokens = await call_llm_anthropic_style(
-                api_key=self.api_key,
-                base_url=self.base_url,
-                model=self.model,
+            from core.llm_provider import call_llm_with_escalation, parse_robust_json
+            import re
+
+            def _parse(text):
+                # critic 用自己的解析逻辑：正则提取 + json.loads
+                if not text:
+                    return None
+                json_match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
+                if json_match:
+                    text = json_match.group(1).strip()
+                try:
+                    return json.loads(text)
+                except Exception:
+                    return parse_robust_json(text)
+
+            def _conf(parsed):
+                if parsed is None:
+                    return None
+                # critic 输出没有 confidence，不基于置信度升级
+                return 1.0
+
+            raw, tokens, escalated = await call_llm_with_escalation(
                 system=_CRITIC_SYSTEM,
                 prompt=prompt,
-                max_tokens=400
+                agent_role="critic",
+                confidence_fn=_conf,
+                parse_fn=_parse,
+                max_tokens=400,
             )
-            
+
             if not raw:
                 return None, 0
-            
-            # JSON 提取
-            import re
-            json_match = re.search(r'(\{.*\}|\[.*\])', raw, re.DOTALL)
-            if json_match:
-                raw = json_match.group(1).strip()
-                
-            return json.loads(raw), tokens
+
+            result = _parse(raw)
+            if escalated:
+                logger.info("CriticAgent: 本次由大模型完成")
+            return result, tokens
         except Exception as e:
             logger.error(f"CriticAgent LLM 调用失败: {e}")
             return None, 0
@@ -308,7 +331,9 @@ class CriticAgent(BaseAgent):
         if comp < _COMPLIANCE_THRESHOLD:
             return PayloadStatus.BLOCKED, RejectReason.OUT_OF_SCOPE
 
-        if stab < _STABILITY_THRESHOLD:
+        # C1c 修复：沙箱降级时收紧 stability 阈值（0.8 -> 0.9）
+        stab_threshold = 0.9 if getattr(self, '_sandbox_degraded', False) else _STABILITY_THRESHOLD
+        if stab < stab_threshold:
             return PayloadStatus.BLOCKED, RejectReason.SYNTAX_ERROR
 
         if noise > _NOISE_THRESHOLD and risk_level < 4:

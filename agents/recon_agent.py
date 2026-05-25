@@ -12,8 +12,6 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from anthropic import AsyncAnthropic
-
 from core.protocols import (
     AgentType,
     BaseAgent,
@@ -125,8 +123,6 @@ class ReconAgent(BaseAgent):
         super().__init__(AgentType.RECON)
         self.api_key = api_key
         self.base_url = base_url or "http://127.0.0.1:8866"
-        self.client = AsyncAnthropic(api_key=self.api_key, base_url=self.base_url)
-        self.model = model
         self._vision_checked = False
         self._vision_supported = False
 
@@ -184,11 +180,12 @@ class ReconAgent(BaseAgent):
         # 限制单轮任务数
         raw_tasks = raw_tasks[:MAX_TASKS_PER_RUN]
 
-        # 硬编码 scope 验证（LLM 不可信）
+        # 硬编码 scope 验证与不可达拦截（LLM 不可信）
         mission_data = view.get("mission", {})
         scope = mission_data.get("scope_expanded", mission_data.get("scope", []))
+        unreachable = set(view.get("unreachable_targets", []))
         valid_tasks = [t for t in raw_tasks
-                       if self._is_in_scope(t.get("target", ""), scope)]
+                       if self._is_in_scope(t.get("target", ""), scope) and t.get("target", "").split(":")[0] not in unreachable]
 
         # CIDR 展开：将网段任务拆解为单 IP 任务（限制最大展开数以防爆炸）
         expanded_tasks = []
@@ -268,9 +265,9 @@ class ReconAgent(BaseAgent):
 
         logger.info(
             f"ReconAgent [{input.agent_id}]: "
-            f"生成 {len(valid_tasks)} 个任务 "
-            f"({sum(1 for t in valid_tasks if not t.get('is_async', False))} 同步 / "
-            f"{sum(1 for t in valid_tasks if t.get('is_async', _ASYNC_DEFAULTS.get(t.get('tool',''), False)))} 异步), "
+            f"生成 {len(deduped_tasks)} 个任务 "
+            f"({sum(1 for t in deduped_tasks if not t.get('is_async', False))} 同步 / "
+            f"{sum(1 for t in deduped_tasks if t.get('is_async', _ASYNC_DEFAULTS.get(t.get('tool',''), False)))} 异步), "
             f"tokens={tokens_used}"
         )
 
@@ -289,25 +286,37 @@ class ReconAgent(BaseAgent):
 
     async def _call_llm(self, prompt: str) -> tuple[dict, int]:
         try:
-            from core.llm_provider import call_llm_anthropic_style
-            raw, tokens = await call_llm_anthropic_style(
-                api_key=self.api_key,
-                base_url=self.base_url,
-                model=self.model,
+            from core.llm_provider import call_llm_with_escalation, parse_robust_json
+
+            def _parse(text):
+                return parse_robust_json(text)
+
+            def _conf(parsed):
+                if parsed is None:
+                    return None
+                # recon 输出没有 confidence 字段，统一返回 1.0 跳过置信度检查
+                # 升级只在解析失败时触发
+                return 1.0
+
+            raw, tokens, escalated = await call_llm_with_escalation(
                 system=_SYSTEM_PROMPT,
                 prompt=prompt,
-                max_tokens=4000
+                agent_role="recon",
+                confidence_fn=_conf,
+                parse_fn=_parse,
+                max_tokens=4000,
             )
-            
+
             if not raw:
                 return self._fallback_output(), 0
-            
-            from core.llm_provider import parse_robust_json
+
             output = parse_robust_json(raw)
             if not output:
                 logger.error(f"ReconAgent 输出非法 JSON 且修复失败: {raw[:200]}...")
                 return self._fallback_output(), 0
-            
+
+            if escalated:
+                logger.info("ReconAgent: 本次由大模型完成")
             return output, tokens
         except Exception as e:
             logger.error(f"ReconAgent LLM 调用失败: {e}")
@@ -438,6 +447,13 @@ class ReconAgent(BaseAgent):
         assets = view.get("assets", {})
         active_host = assets.get("active_host")
         if not active_host:
+            return []
+
+        # B3 修复：如果 pending 队列已有任务，跳过启发式生成避免重复
+        pending_recon_list = view.get("pending_recon_list", [])
+        active_pending = [t for t in pending_recon_list if t.get("status") in ("PENDING", "RUNNING")]
+        if len(active_pending) >= 2:
+            logger.debug(f"启发式规则: pending 队列已有 {len(active_pending)} 个任务，跳过")
             return []
         
         ip = active_host.get("host", {}).get("ip")

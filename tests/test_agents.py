@@ -23,6 +23,11 @@ import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from agents.recon_agent import ReconAgent, MAX_TASKS_PER_RUN
+from agents.exploit_agent import ExploitAgent
+from agents.critic_agent import CriticAgent
+from agents.cleanup_agent import CleanupAgent
+
 from core.protocols import (
     AgentType,
     Event,
@@ -88,16 +93,11 @@ class TestReconAgent:
             "info_needed": None,
         })
 
-        with patch("anthropic.AsyncAnthropic") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.messages.create = AsyncMock(
-                return_value=_mock_llm_response(llm_out)
-            )
-            mock_client_cls.return_value = mock_client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
 
-            from agents.recon_agent import ReconAgent
+            mock_llm.return_value = (llm_out, 100)
+
             agent = ReconAgent()
-            agent.client = mock_client
 
             inp = _make_node_input({
                 "mission":  {"scope": ["10.0.0.0/24"]},
@@ -125,16 +125,11 @@ class TestReconAgent:
             "info_needed": None,
         })
 
-        with patch("anthropic.AsyncAnthropic") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.messages.create = AsyncMock(
-                return_value=_mock_llm_response(llm_out)
-            )
-            mock_client_cls.return_value = mock_client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
 
-            from agents.recon_agent import ReconAgent
+            mock_llm.return_value = (llm_out, 100)
+
             agent = ReconAgent()
-            agent.client = mock_client
 
             inp = _make_node_input({
                 "mission":  {"scope": ["10.0.0.0/24"]},
@@ -157,16 +152,11 @@ class TestReconAgent:
         ]
         llm_out = json.dumps({"think": "scan", "tasks": tasks, "info_needed": None})
 
-        with patch("anthropic.AsyncAnthropic") as mock_client_cls:
-            mock_client = MagicMock()
-            mock_client.messages.create = AsyncMock(
-                return_value=_mock_llm_response(llm_out)
-            )
-            mock_client_cls.return_value = mock_client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
 
-            from agents.recon_agent import ReconAgent, MAX_TASKS_PER_RUN
+            mock_llm.return_value = (llm_out, 100)
+
             agent = ReconAgent()
-            agent.client = mock_client
 
             inp = _make_node_input({
                 "mission":  {"scope": ["10.0.0.0/24"]},
@@ -204,14 +194,11 @@ class TestExploitAgent:
     async def test_normal_mode_writes_payload_and_tried_vector(self):
         from agents.exploit_agent import ExploitAgent
 
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(
-                return_value=_mock_llm_response(self._make_normal_llm_out())
-            )
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+
+            mock_llm.return_value = (self._make_normal_llm_out(), 100)
+
             agent = ExploitAgent()
-            agent.client = client
 
             inp = _make_node_input({
                 "mission": {"scope": ["10.0.0.0/24"], "risk_level": 3},
@@ -245,14 +232,11 @@ class TestExploitAgent:
         # LLM returns a target outside scope
         llm_out = self._make_normal_llm_out(target="1.2.3.4:445")
 
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(
-                return_value=_mock_llm_response(llm_out)
-            )
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+
+            mock_llm.return_value = (llm_out, 100)
+
             agent = ExploitAgent()
-            agent.client = client
 
             inp = _make_node_input({
                 "mission": {"scope": ["10.0.0.0/24"], "risk_level": 3},
@@ -288,14 +272,11 @@ class TestExploitAgent:
             retry_count=1,
         )
 
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(
-                return_value=_mock_llm_response(fixup_llm_out)
-            )
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+
+            mock_llm.return_value = (fixup_llm_out, 100)
+
             agent = ExploitAgent()
-            agent.client = client
 
             inp = NodeInput(
                 state_view={
@@ -348,13 +329,9 @@ class TestCriticAgent:
         from agents.critic_agent import CriticAgent
 
         payload = self._make_payload("rm -rf / && echo done")
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            # LLM should NOT be called
-            client.messages.create = AsyncMock(side_effect=AssertionError("LLM should not be called"))
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = AssertionError("LLM should not be called")
             agent = CriticAgent()
-            agent.client = client
 
             inp = _make_node_input({
                 "payload": payload,
@@ -379,12 +356,9 @@ class TestCriticAgent:
         from agents.critic_agent import CriticAgent
 
         payload = self._make_payload("whoami", target="1.2.3.4")  # outside scope
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(side_effect=AssertionError("should not call LLM"))
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = AssertionError("should not call LLM")
             agent = CriticAgent()
-            agent.client = client
 
             inp = _make_node_input({
                 "payload": payload,
@@ -408,12 +382,9 @@ class TestCriticAgent:
         })
 
         payload = self._make_payload("whoami")
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(return_value=_mock_llm_response(llm_resp))
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = (llm_resp, 100)
             agent = CriticAgent()
-            agent.client = client
 
             inp = _make_node_input({
                 "payload": payload,
@@ -439,12 +410,9 @@ class TestCriticAgent:
         })
 
         payload = self._make_payload("nmap -sV -p- 10.0.0.5")
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(return_value=_mock_llm_response(llm_resp))
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = (llm_resp, 100)
             agent = CriticAgent()
-            agent.client = client
 
             inp = _make_node_input({
                 "payload": payload,
@@ -477,12 +445,9 @@ class TestCriticAgent:
         })
 
         payload = self._make_payload("netsh advfirewall set allprofiles state off")
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(return_value=_mock_llm_response(llm_resp))
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = (llm_resp, 100)
             agent = CriticAgent()
-            agent.client = client
 
             inp = _make_node_input({
                 "payload": payload,
@@ -540,12 +505,11 @@ class TestCleanupAgent:
         ]
         mission = {"scope": ["10.0.0.0/24"], "id": "m1"}
 
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(return_value=_mock_llm_response(llm_resp))
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+
+            mock_llm.return_value = (llm_resp, 100)
+
             agent = CleanupAgent()
-            agent._client = client
 
             inp = _make_node_input({
                 "footprints":     fps,
@@ -568,12 +532,11 @@ class TestCleanupAgent:
     async def test_empty_footprints_returns_no_output(self):
         from agents.cleanup_agent import CleanupAgent
 
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(side_effect=AssertionError("should not call LLM"))
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+
+            mock_llm.side_effect = AssertionError("should not call LLM")
+
             agent = CleanupAgent()
-            agent._client = client
 
             inp = _make_node_input({
                 "footprints":     [],
@@ -604,12 +567,11 @@ class TestCleanupAgent:
         fps = [self._make_footprint("fp1", target="10.0.0.5")]
         mission = {"scope": ["10.0.0.0/24"]}
 
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(return_value=_mock_llm_response(llm_resp))
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+
+            mock_llm.return_value = (llm_resp, 100)
+
             agent = CleanupAgent()
-            agent._client = client
 
             inp = _make_node_input({
                 "footprints":     fps,
@@ -642,14 +604,11 @@ class TestKnowledgeQuery:
             },
         })
 
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(
-                return_value=_mock_llm_response(llm_out)
-            )
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+
+            mock_llm.return_value = (llm_out, 100)
+
             agent = ReconAgent()
-            agent.client = client
 
             inp = _make_node_input({
                 "mission": {"scope": ["10.0.0.0/24"]},
@@ -699,14 +658,11 @@ class TestKnowledgeQuery:
             },
         })
 
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(
-                return_value=_mock_llm_response(llm_out)
-            )
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+
+            mock_llm.return_value = (llm_out, 100)
+
             agent = ExploitAgent()
-            agent.client = client
 
             inp = _make_node_input({
                 "mission": {"scope": ["10.0.0.0/24"], "risk_level": 3},
@@ -758,14 +714,11 @@ class TestKnowledgeQuery:
             retry_count=1,
         )
 
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(
-                return_value=_mock_llm_response(fixup_llm_out)
-            )
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+
+            mock_llm.return_value = (fixup_llm_out, 100)
+
             agent = ExploitAgent()
-            agent.client = client
 
             inp = NodeInput(
                 state_view={"_fixup_mode": True},
@@ -797,14 +750,11 @@ class TestKnowledgeQuery:
             "knowledge_query": None,
         })
 
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(
-                return_value=_mock_llm_response(llm_out)
-            )
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+
+            mock_llm.return_value = (llm_out, 100)
+
             agent = ReconAgent()
-            agent.client = client
 
             inp = _make_node_input({
                 "mission": {"scope": ["10.0.0.0/24"]},
@@ -837,14 +787,11 @@ class TestKnowledgeQuery:
             },
         })
 
-        with patch("anthropic.AsyncAnthropic") as mc:
-            client = MagicMock()
-            client.messages.create = AsyncMock(
-                return_value=_mock_llm_response(llm_out)
-            )
-            mc.return_value = client
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+
+            mock_llm.return_value = (llm_out, 100)
+
             agent = ReconAgent()
-            agent.client = client
 
             inp = _make_node_input({
                 "mission": {"scope": ["10.0.0.0/24"]},

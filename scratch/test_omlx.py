@@ -15,7 +15,7 @@ async def test_omlx():
     headers_list = [
         # 1. 模拟 Anthropic SDK (带你截图里的 Key)
         {
-            "x-api-key": "Ww131421",
+            "x-api-key": os.getenv("API_KEY", "missing_key"),
             "anthropic-version": "2023-06-01",
             "content-type": "application/json"
         },

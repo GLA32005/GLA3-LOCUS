@@ -83,6 +83,7 @@ class StatePruner:
             "recon_running":     await state_api.count_running_recon(),
             "async_tasks_done":  len(await state_api.get_done_tasks()),
         }
+        view["unreachable_targets"] = list(await state_api.get_unreachable_targets())
 
         # ── 6b. pending recon 任务列表（精简，供 Recon Agent 去重）──
         pending_recon = await state_api.get_pending_recon_tasks()
@@ -124,7 +125,7 @@ class StatePruner:
                 # ── 增强状态感知 (Issue 1 & 6) ──
                 # 在视图中显式展示不可达状态及超时统计
                 host_props = host_detail.get("host", {})
-                if host_props.get("unreachable"):
+                if host_props.get("unreachable") or await state_api.is_unreachable(active_target):
                     host_props["_system_note"] = "!! 警告：此目标经多次探测被判定为不可达 (TARGET_UNREACHABLE) !!"
                 
                 # 截断 banner 等长字段防止超预算

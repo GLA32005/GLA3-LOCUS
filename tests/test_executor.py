@@ -32,11 +32,15 @@ from executor.tools import ToolResult
 # ── 辅助 ────────────────────────────────────────────────────
 
 def _make_mock_state_api():
-    api = MagicMock()
-    api.apply_mutation = AsyncMock()
-    api.get_host_full = AsyncMock(return_value={"creds": []})
-    api.mark_footprint_cleaned = AsyncMock()
-    return api
+    m = MagicMock()
+    m.redis = MagicMock()
+    m.redis.exists = AsyncMock(return_value=False)
+    m.redis.get = AsyncMock(return_value=None)
+    m.redis.set = AsyncMock()
+    m.apply_mutation = AsyncMock(return_value=True)
+    m.get_focus = AsyncMock(return_value={})
+    m.get_mission = AsyncMock(return_value={"scope": ["10.0.0.0/24"]})
+    return m
 
 
 def _make_mock_event_bus():
@@ -68,9 +72,7 @@ class TestRouting:
     async def test_lotl_routes_to_exec_lotl(self):
         state_api = _make_mock_state_api()
         bus = _make_mock_event_bus()
-        executor = Executor.__new__(Executor)
-        executor.state_api = state_api
-        executor.event_bus = bus
+        executor = Executor(state_api, bus)
         executor.sandbox = MagicMock()
         executor._tools = {}
 
@@ -94,9 +96,7 @@ class TestRouting:
     async def test_unknown_vector_type_returns_fail(self):
         state_api = _make_mock_state_api()
         bus = _make_mock_event_bus()
-        executor = Executor.__new__(Executor)
-        executor.state_api = state_api
-        executor.event_bus = bus
+        executor = Executor(state_api, bus)
         executor.sandbox = MagicMock()
         executor._tools = {}
 
@@ -123,9 +123,7 @@ class TestSandboxBlock:
     async def test_sandbox_block_records_sandbox_fail(self):
         state_api = _make_mock_state_api()
         bus = _make_mock_event_bus()
-        executor = Executor.__new__(Executor)
-        executor.state_api = state_api
-        executor.event_bus = bus
+        executor = Executor(state_api, bus)
         executor.sandbox = MagicMock()
         executor._tools = {}
 
@@ -154,9 +152,7 @@ class TestExecuteRecon:
     async def test_unknown_tool_marks_failed(self):
         state_api = _make_mock_state_api()
         bus = _make_mock_event_bus()
-        executor = Executor.__new__(Executor)
-        executor.state_api = state_api
-        executor.event_bus = bus
+        executor = Executor(state_api, bus)
         executor._tools = {}  # 空路由表
 
         task = {"id": "t1", "tool": "nonexistent_tool", "target": "10.0.0.5", "params": {}}
@@ -173,9 +169,7 @@ class TestExecuteRecon:
     async def test_success_emits_task_completed_and_asset_events(self):
         state_api = _make_mock_state_api()
         bus = _make_mock_event_bus()
-        executor = Executor.__new__(Executor)
-        executor.state_api = state_api
-        executor.event_bus = bus
+        executor = Executor(state_api, bus)
 
         mock_tool = MagicMock()
         mock_tool.run = AsyncMock(return_value=ToolResult(
@@ -220,9 +214,7 @@ class TestExecuteCleanup:
     async def test_empty_content_marks_manual_required(self):
         state_api = _make_mock_state_api()
         bus = _make_mock_event_bus()
-        executor = Executor.__new__(Executor)
-        executor.state_api = state_api
-        executor.event_bus = bus
+        executor = Executor(state_api, bus)
 
         task = {"id": "c1", "target": "10.0.0.5", "content": None, "executor_hint": "bash"}
         await executor.execute_cleanup(task)
@@ -279,9 +271,7 @@ class TestRecordVector:
     async def test_vector_mutation_is_append(self):
         state_api = _make_mock_state_api()
         bus = _make_mock_event_bus()
-        executor = Executor.__new__(Executor)
-        executor.state_api = state_api
-        executor.event_bus = bus
+        executor = Executor(state_api, bus)
 
         await executor._record_vector(
             payload=_make_payload(),
@@ -301,9 +291,7 @@ class TestRecordVector:
     async def test_footprint_is_append(self):
         state_api = _make_mock_state_api()
         bus = _make_mock_event_bus()
-        executor = Executor.__new__(Executor)
-        executor.state_api = state_api
-        executor.event_bus = bus
+        executor = Executor(state_api, bus)
 
         await executor._append_footprint({
             "type": "SSH_EXEC",

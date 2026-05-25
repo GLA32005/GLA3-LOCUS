@@ -195,10 +195,11 @@ class Executor:
         self._discovered_ips: set[str] = set()   # 已发现的 IP，用于事件去重
         self._running_recon: set[str] = set()     # 正在执行的 recon task_id，防止重复分发
         self._mission_scope: list[str] = []       # 缓存 scope，启动时加载
+        self._host_timeouts: dict[str, int] = {}  # 追踪目标超时次数
 
     async def _load_scope(self):
         """从 Redis 加载 mission scope，带缓存"""
-        if not self._mission_scope:
+        if not getattr(self, '_mission_scope', None):
             mission = await self.state_api.get_mission()
             self._mission_scope = mission.get("scope_expanded", mission.get("scope", []))
         return self._mission_scope
@@ -266,11 +267,22 @@ class Executor:
             await self._record_vector(
                 payload=payload,
                 result=VectorResult.SANDBOX_FAIL,
-                fail_reason="SYNTAX_ERROR",
+                fail_reason="SANDBOX_SYNTAX_ERROR",
                 info_gain=0.0,
                 duration_ms=duration_ms,
             )
             await self._update_payload_status(payload_id, PayloadStatus.DONE)
+            from core.protocols import RejectReason
+            await self.event_bus.publish(Event(
+                type=EventType.PAYLOAD_REJECTED,
+                source="executor",
+                payload={
+                    "payload_id": payload_id,
+                    "target": target,
+                    "reject_reason": RejectReason.SYNTAX_ERROR,
+                    "detail": sandbox_result.reason
+                }
+            ))
             return
 
         # ── 3. 路由并执行 ─────────────────────────────────────
@@ -307,11 +319,23 @@ class Executor:
         duration_ms = tool_result.duration_ms or int((time.time() - t0) * 1000)
         vec_result  = (VectorResult.SUCCESS if tool_result.success
                        else VectorResult.FAIL)
+                       
+        fail_reason = None
+        if not tool_result.success:
+            err_str = (tool_result.error or str(tool_result.raw.get("stderr", ""))).lower()
+            if duration_ms < 50:
+                fail_reason = "NETWORK_UNREACHABLE"
+            elif "authentication" in err_str or "permission denied" in err_str:
+                fail_reason = "AUTH_FAILED"
+            elif "refused" in err_str or "not found" in err_str:
+                fail_reason = "SERVICE_NOT_FOUND"
+            else:
+                fail_reason = "EXECUTION_FAILED"
 
         await self._record_vector(
             payload=payload,
             result=vec_result,
-            fail_reason="UNKNOWN" if not tool_result.success else None,
+            fail_reason=fail_reason,
             info_gain=tool_result.info_gain,
             duration_ms=duration_ms,
         )
@@ -383,6 +407,31 @@ class Executor:
         except asyncio.TimeoutError:
             logger.warning(f"Executor: recon 超时 task={task_id} tool={tool_name}")
             await self._update_recon_status(task_id, TaskStatus.TIMEOUT)
+            
+            # A2 修复：所有工具超时都计入目标超时计数（不限 nmap）
+            self._host_timeouts[target] = self._host_timeouts.get(target, 0) + 1
+            if self._host_timeouts[target] >= 3:
+                logger.error(f"目标 {target} 连续 3 次扫描超时，标记为 UNREACHABLE")
+                await self.event_bus.publish(Event(
+                    type=EventType.TARGET_UNREACHABLE,
+                    priority=EventPriority.HIGH,
+                    source="executor",
+                    payload={"target": target, "reason": "Consecutive timeouts"}
+                ))
+
+            # A2 修复：超时也发送 TASK_COMPLETED，让 Orchestrator 感知任务结束
+            await self.event_bus.publish(
+                Event.task_completed(
+                    task_id=task_id,
+                    result={
+                        "tool":        tool_name,
+                        "target":      target,
+                        "assets_found": 0,
+                        "duration_ms":  0,
+                        "status":      "TIMEOUT",
+                    },
+                )
+            )
             return
         except Exception as e:
             logger.error(f"Executor: recon 异常 task={task_id} {e}")

@@ -252,8 +252,7 @@ class TestGenerate:
     async def test_generate_with_no_findings_skips_llm(self, generator):
         """无成功发现时，不调用 LLM 生成建议"""
         state_api = MagicMock()
-        state_api.ch = MagicMock()
-        state_api.ch.execute = MagicMock(return_value=[])  # ClickHouse 无成功记录
+        state_api._run_ch = AsyncMock(return_value=[])  # ClickHouse 无成功记录
         state_api.get_all_footprints = AsyncMock(return_value=[])
         state_api.get_vectors_summary = AsyncMock(return_value={"total": 0})
         state_api.count_hosts = AsyncMock(return_value=0)
@@ -281,8 +280,7 @@ class TestGenerate:
         # mock ClickHouse execute 返回成功记录
         mock_result = [("f1", "10.0.0.5:445", "LOTL", "certutil", "SUCCESS",
                         "UNKNOWN", 0.8, 0, "2025-01-01T10:00:00")]
-        state_api.ch = MagicMock()
-        state_api.ch.execute = MagicMock(return_value=mock_result)
+        state_api._run_ch = AsyncMock(return_value=mock_result)
         state_api.get_all_footprints = AsyncMock(return_value=[])
         state_api.get_vectors_summary = AsyncMock(return_value={"total": 1, "success_count": 1})
         state_api.count_hosts = AsyncMock(return_value=1)
@@ -300,19 +298,19 @@ class TestGenerate:
             {"ip": "10.0.0.5", "access_level": "ROOT", "os": "Linux", "out_of_scope": False, "open_ports": [22, 80]}
         ]
 
-        with patch("core.report_generator.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
+        with patch("core.llm_provider.call_llm_anthropic_style", new_callable=AsyncMock) as mock_llm:
             mock_llm.return_value = (json.dumps(recs), 100)
 
-        mission = {"goal": "test", "scope": ["10.0.0.0/24"], "risk_level": 3}
+            mission = {"goal": "test", "scope": ["10.0.0.0/24"], "risk_level": 3}
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            os.environ["REPORT_OUTPUT_DIR"] = tmpdir
-            try:
-                report = await generator.generate(state_api, mission)
-            finally:
-                del os.environ["REPORT_OUTPUT_DIR"]
+            with tempfile.TemporaryDirectory() as tmpdir:
+                os.environ["REPORT_OUTPUT_DIR"] = tmpdir
+                try:
+                    report = await generator.generate(state_api, mission)
+                finally:
+                    del os.environ["REPORT_OUTPUT_DIR"]
 
-        assert len(report["findings"]) == 1
-        assert len(report["recommendations"]) == 1
-        assert "10.0.0.5" in report["executive_summary"]
-        mock_llm.assert_awaited_once()
+            assert len(report["findings"]) == 1
+            assert len(report["recommendations"]) == 1
+            assert report["assets_summary"][0]["ip"] == "10.0.0.5"
+            mock_llm.assert_awaited_once()

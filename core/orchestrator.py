@@ -88,12 +88,17 @@ class Orchestrator:
         self._think_count     = 0     # Think 轮次计数
         self._start_time      = 0.0   # 启动时间戳
         self._total_stall_count = 0   # 累计 stall，永不重置
+        self._parse_failure_count = 0 # LLM 解析失败次数
+        self._active_executor_tasks = 0 # 当前正在运行的 Executor 任务数
         self._recon_sent_keys: set[str] = set()
         self._exploit_sent_keys: set[str] = set()
 
         self._is_thinking = False
         self._system_hint: Optional[str] = None  # 传给 Planner 的临时提示 (Issue 4)
         self._host_timeouts: dict[str, int] = {}  # 追踪主机的连续超时/失败次数 (Issue 1)
+        self._consecutive_recon_rounds = 0  # 连续 RECON 无新主机轮次
+        self._last_known_hosts = 0          # 上次已知主机数
+        self._force_strong_next_think = False  # 下次 Think 强制大模型
 
         # 并发配额追踪
         self._current_noise = 0
@@ -108,14 +113,18 @@ class Orchestrator:
         self._is_running = True
         logger.info("Orchestrator started")
 
-        await asyncio.gather(
-            self._event_loop(),
-            self._think_loop(),
-            self._executor_loop(),
-        )
+        self._running_tasks = [
+            asyncio.create_task(self._event_loop()),
+            asyncio.create_task(self._think_loop()),
+            asyncio.create_task(self._executor_loop())
+        ]
+        await asyncio.gather(*self._running_tasks)
 
     def stop(self):
         self._is_running = False
+        if hasattr(self, '_running_tasks'):
+            for task in self._running_tasks:
+                task.cancel()
 
     # ── 主事件循环 ────────────────────────────────────────────
 
@@ -168,6 +177,7 @@ class Orchestrator:
             EventType.CLEANUP_STATE:        self._handle_cleanup_state,
             EventType.HUMAN_APPROVAL_REQ:   self._handle_human_approval,
             EventType.PAYLOAD_APPROVED:     self._handle_payload_approved,
+            EventType.TARGET_UNREACHABLE:   self._handle_target_unreachable,
         }
         handler = handlers.get(event.type)
         if handler:
@@ -254,14 +264,34 @@ class Orchestrator:
 
         try:
             pruned_view = await self.pruner.generate_view(self.state_api)
-            planner_output = await self.planner.think(pruned_view, system_hint=self._system_hint)
+            focus = pruned_view.get("focus", {})
+            active_target = focus.get("active_target")
+            if active_target and await self.state_api.is_unreachable(active_target):
+                unreach_hint = (
+                    f"❗ 极度紧急警告：当前焦点目标 {active_target} 经多次探测确认无法连通 (TARGET_UNREACHABLE)！"
+                    "请立刻放弃对该目标的探索，并从范围内选择其他有效目标进行渗透测试，切勿在此目标上浪费任何资源。"
+                )
+                self._system_hint = f"{unreach_hint}\n\n{self._system_hint or ''}".strip()
+
+            force_strong = self._force_strong_next_think
+            self._force_strong_next_think = False
+            planner_output = await self.planner.think(
+                pruned_view,
+                system_hint=self._system_hint,
+                force_strong=force_strong,
+            )
             # 消费完 hint 后清除，避免污染后续正常 Think
             self._system_hint = None
             
             await self._dispatch_planner_output(planner_output)
             await self._print_progress()
+            self._parse_failure_count = 0  # 成功则重置解析失败计数
         except Exception as e:
-            logger.error(f"Planner Think 失败: {e}")
+            self._parse_failure_count += 1
+            logger.error(f"Planner Think 失败 (连续 {self._parse_failure_count} 次): {e}")
+            if self._parse_failure_count >= 5:
+                logger.error("LLM 解析连续失败达到 5 次，强制触发清理")
+                await self._force_cleanup("llm_parse_failures_exhausted")
         finally:
             self._is_thinking = False
 
@@ -316,6 +346,15 @@ class Orchestrator:
         new_goal = llm_focus.get("current_goal", old_goal)
         active_target = llm_focus.get("active_target") or current_focus.get("active_target")
 
+        # B1 修复：校验 LLM 返回的 active_target 是否在 scope 内
+        if active_target and "active_target" in llm_focus:
+            mission = await self.state_api.get_mission()
+            scope = mission.get("scope_expanded", mission.get("scope", []))
+            if scope and not self._is_target_in_scope(active_target, scope):
+                logger.warning(f"Orchestrator: LLM 返回的 active_target={active_target} 越界，回退至当前目标")
+                active_target = current_focus.get("active_target")
+                llm_focus["active_target"] = active_target
+
         # 增加 EXPLOIT 硬拦截：如果没有服务信息，禁止进入 EXPLOIT 阶段 (Issue 2)
         if new_goal == "EXPLOIT" and active_target:
             host_info = await self.state_api.get_host_full(active_target)
@@ -358,16 +397,17 @@ class Orchestrator:
         updates["opportunity_flag"] = False # 强制清理机会标志
         updates["opportunity_target"] = None
         
-        # 判定是否有实质性进展：阶段切换不再作为重置 stall 的依据 (Issue 5)
-        # stall_count 仅在此处自然递增，重置由 TASK_COMPLETED 等事件处理器负责
-        updates["stall_count"] = int(current_focus.get("stall_count", 0)) + 1
+        # B2 修复：移除重复的 stall_count 递增
+        # stall_count 的唯一递增点在 _apply_node_output 中，当 Agent 未生成有效任务时才递增
             
         await self.state_api.update_focus_atomic(updates)
+        # 读取真实 stall 值用于日志（updates 中可能不含 stall_count）
+        real_stall = updates.get('stall_count', current_focus.get('stall_count', 0))
         logger.info(
             f"Focus updated: goal={updates.get('current_goal')} "
             f"target={updates.get('active_target', current_focus.get('active_target'))} "
             f"conf={float(updates.get('confidence') or 0):.2f} "
-            f"stall={updates.get('stall_count', 0)}"
+            f"stall={real_stall}"
         )
 
         # 路由到对应 Agent
@@ -384,9 +424,45 @@ class Orchestrator:
             AgentType.CLEANUP: self._invoke_cleanup,
         }
 
-        agent_type = AgentType(act.get("agent", "recon"))
+        try:
+            agent_type = AgentType(act.get("agent", "recon"))
+        except ValueError:
+            logger.error(f"Planner 输出非法 AgentType: {act.get('agent')}，安全降级至 RECON")
+            agent_type = AgentType.RECON
+
         handler = agent_map.get(agent_type)
         if handler:
+            # 连续 RECON 轮次检测：无新主机时累积计数
+            if agent_type == AgentType.RECON:
+                current_hosts = await self.state_api.count_hosts()
+                if current_hosts > self._last_known_hosts:
+                    self._consecutive_recon_rounds = 0
+                    self._last_known_hosts = current_hosts
+                else:
+                    self._consecutive_recon_rounds += 1
+
+                RECON_ROUND_LIMIT = 10
+                if self._consecutive_recon_rounds >= RECON_ROUND_LIMIT:
+                    logger.warning(
+                        f"连续 {self._consecutive_recon_rounds} 轮 RECON 无新主机发现，"
+                        f"强制切换到 EXPLOIT"
+                    )
+                    self._consecutive_recon_rounds = 0
+                    await self.state_api.update_focus_atomic({
+                        "current_goal": "EXPLOIT",
+                        "stall_count": 0,
+                        "hypothesis": f"RECON 阶段连续 {RECON_ROUND_LIMIT} 轮无新发现，强制进入 EXPLOIT",
+                    })
+                    self._system_hint = (
+                        "重要：侦察阶段已连续多轮无进展，请基于已有信息生成利用方案。"
+                        "不要再请求侦察任务。"
+                    )
+                    await self._trigger_think(force=True)
+                    return
+            else:
+                # 非 RECON 重置计数
+                self._consecutive_recon_rounds = 0
+
             await handler(act, output)
 
     # ── 事件处理器 ────────────────────────────────────────────
@@ -410,6 +486,23 @@ class Orchestrator:
         # 读取 mission 配置的最大重试次数
         mission = await self.state_api.get_mission()
         max_retry = mission.get("max_payload_retry", 3)
+
+        # B5a 修复：OUT_OF_SCOPE 是结构性问题，最多重试 1 次
+        if p.get("reject_reason") == RejectReason.OUT_OF_SCOPE and retry_count >= 1:
+            logger.info(f"Payload {p['payload_id']} 因 OUT_OF_SCOPE 超限 (max=1)，标记 ABANDONED")
+            mutation = StateMutation(
+                operation=MutationOperation.APPEND,
+                domain=StateDomain.TRIED_VECTORS,
+                payload={
+                    "id":          p["payload_id"],
+                    "result":      "ABANDONED",
+                    "fail_reason": "OUT_OF_SCOPE_MAX_RETRY",
+                    "retry_count": retry_count,
+                }
+            )
+            await self.state_api.apply_mutation(mutation)
+            await self._trigger_think(force=True)
+            return
 
         if retry_count >= max_retry:
             # 超过重试上限，标记 ABANDONED，让 Planner 换策略
@@ -468,28 +561,28 @@ class Orchestrator:
         )
         await self.state_api.apply_mutation(mutation)
         
-        # ── 超时与失败追踪 (Issue 1 & 6) ──
+        # ── 超时与失败追踪 ──
+        # 注意：TARGET_UNREACHABLE 事件由 Executor 侧 _host_timeouts 统一触发，
+        # Orchestrator 不再重复追踪，避免双重计数。
         status = result.get("status", "DONE")
-        if status in ("TIMEOUT", "FAILED"):
-            self._host_timeouts[target] = self._host_timeouts.get(target, 0) + 1
-            if self._host_timeouts[target] >= 3:
-                logger.error(f"Orchestrator: 目标 {target} 连续 3 次探测失败，判定为 TARGET_UNREACHABLE")
-                await self.event_bus.publish(Event(
-                    type=EventType.TARGET_UNREACHABLE,
-                    priority=EventPriority.CRITICAL,
-                    source="orchestrator",
-                    payload={"target": target, "reason": "Consecutive timeouts/failures"}
-                ))
-                # 在 Neo4j 中标记不可达
-                await self.state_api.apply_mutation(StateMutation(
-                    operation=MutationOperation.UPSERT,
-                    domain=StateDomain.ASSETS,
-                    payload={"ip": target, "unreachable": True, "status": "UNREACHABLE"}
-                ))
-        else:
-            # 任务成功完成，重置计数
+        if status not in ("TIMEOUT", "FAILED"):
+            # 任务成功完成，重置该目标的超时计数
             self._host_timeouts[target] = 0
-            await self.state_api.update_focus_atomic({"stall_count": 0})
+            # 仅在发现新资产时重置 stall，避免无意义任务抹除 stall 信号
+            if assets_found > 0:
+                await self.state_api.update_focus_atomic({"stall_count": 0})
+
+        if target and target != "?" and tool and tool != "?":
+            params_str = json.dumps(result.get("params", {}), sort_keys=True)
+            import hashlib
+            cmd_hash = hashlib.md5(f"{tool}:{target}:{params_str}".encode()).hexdigest()[:12]
+            dedup_key = f"sent_recon:{cmd_hash}"
+            if status in ("TIMEOUT", "FAILED"):
+                logger.debug(f"Recon: 任务超时/失败，主动删除冷却锁 {dedup_key}")
+                await self.state_api.redis.delete(dedup_key)
+            else:
+                logger.debug(f"Recon: 任务成功完成，续期冷却锁 {dedup_key} (1800s)")
+                await self.state_api.redis.setex(dedup_key, 1800, "1")
 
         # 启发式决策：Web 探测返回 403 Forbidden 时，自动追加 Bypass 侦察
         status_code = str(result.get("status", ""))
@@ -620,11 +713,78 @@ class Orchestrator:
                 "Resolve via GET /cleanup/tasks and POST /cleanup/approve."
             )
 
+    async def _handle_target_unreachable(self, event: Event):
+        """处理目标不可达事件，记入黑板并清理 dedup 锁，检测全 scope 不可达"""
+        target = event.payload.get("target")
+        if not target:
+            return
+        logger.error(f"Orchestrator: 处理不可达事件，目标 {target} 记录至黑板")
+        await self.state_api.add_unreachable_target(target)
+
+        # A3 修复：清理该目标相关的 recon dedup 锁，防止锁残留阻塞后续任务
+        cursor = b"0"
+        cleaned = 0
+        while True:
+            cursor, keys = await self.state_api.redis.scan(
+                cursor=cursor, match="sent_recon:*", count=100
+            )
+            if keys:
+                await self.state_api.redis.delete(*keys)
+                cleaned += len(keys)
+            if cursor == 0 or cursor == b"0":
+                break
+        if cleaned:
+            logger.info(f"Orchestrator: 已清理 {cleaned} 个 recon dedup 锁")
+
+        # 检测是否所有 scope 目标都不可达 → 强制切换 EXPLOIT 或终止
+        mission = await self.state_api.get_mission()
+        scope = mission.get("scope_expanded", mission.get("scope", []))
+        unreachable = await self.state_api.get_unreachable_targets()
+        all_unreachable = scope and all(
+            t in unreachable for t in scope
+        )
+        if all_unreachable:
+            # 检查是否已有可利用的服务信息
+            owned = await self.state_api.count_owned_hosts()
+            focus = await self.state_api.get_focus()
+            active_target = focus.get("active_target", "")
+            host_info = await self.state_api.get_host_full(active_target) if active_target else None
+            services = host_info.get("services", []) if host_info else []
+
+            if services:
+                logger.warning(
+                    f"Orchestrator: 所有 scope 目标均不可达，但 {active_target} 已有 {len(services)} 个服务信息，强制切换到 EXPLOIT"
+                )
+                await self.state_api.update_focus_atomic({
+                    "current_goal": "EXPLOIT",
+                    "stall_count": 0,
+                })
+                self._system_hint = (
+                    f"重要：所有目标的侦察扫描均已超时，但我们已发现 {active_target} 上的 {len(services)} 个服务。"
+                    "请立即基于已有服务信息生成利用方案，不要再请求侦察任务。"
+                )
+            else:
+                logger.error(
+                    "Orchestrator: 所有 scope 目标均不可达且无服务信息，强制进入清理阶段"
+                )
+                await self._force_cleanup("all_targets_unreachable")
+
     # ── Agent 调用方法 ────────────────────────────────────────
 
     async def _invoke_recon(self, act: dict, planner_output: dict):
         from .protocols import NodeInput
         pruned = await self.pruner.generate_view(self.state_api)
+        focus = pruned.get("focus", {})
+        active_target = focus.get("active_target")
+        if active_target and await self.state_api.is_unreachable(active_target):
+            logger.warning(f"Recon: 目标 {active_target} 已被标记为不可达，拒绝下发探测任务")
+            # 累积 stall，避免死锁
+            current_focus = await self.state_api.get_focus()
+            new_stall = int(current_focus.get("stall_count", 0)) + 1
+            self._total_stall_count += 1
+            await self.state_api.update_focus_atomic({"stall_count": new_stall})
+            logger.warning(f"Recon 不可达空转，stall={new_stall}")
+            return
 
         # 检查是否已有足够的 pending recon 任务
         pending_recon_list = pruned.get("pending_recon_list", [])
@@ -647,6 +807,17 @@ class Orchestrator:
     async def _invoke_exploit(self, act: dict, planner_output: dict):
         from .protocols import NodeInput
         pruned = await self.pruner.generate_view(self.state_api)
+        focus = pruned.get("focus", {})
+        active_target = focus.get("active_target")
+        if active_target and await self.state_api.is_unreachable(active_target):
+            logger.warning(f"Exploit: 目标 {active_target} 已被标记为不可达，拒绝生成利用 payload")
+            # 累积 stall，避免死锁
+            current_focus = await self.state_api.get_focus()
+            new_stall = int(current_focus.get("stall_count", 0)) + 1
+            self._total_stall_count += 1
+            await self.state_api.update_focus_atomic({"stall_count": new_stall})
+            return
+
         node_input = NodeInput(
             state_view=pruned,
             trigger_event=Event(
@@ -664,8 +835,16 @@ class Orchestrator:
                                      retry_count: int):
         """快速修正模式：直接注入 reject_reason，绕过 Planner"""
         from .protocols import NodeInput
+        # B5a 修复：fixup 模式下也需要 active_target 和 mission 信息
+        focus = await self.state_api.get_focus()
+        mission = await self.state_api.get_mission()
+        fixup_view = {
+            "_fixup_mode": True,
+            "active_target": focus.get("active_target", ""),
+            "mission": mission,
+        }
         node_input = NodeInput(
-            state_view={"_fixup_mode": True},  # 极简视图，省 token
+            state_view=fixup_view,
             trigger_event=Event(
                 type=EventType.PAYLOAD_REJECTED,
                 priority=EventPriority.CRITICAL,
@@ -811,22 +990,26 @@ class Orchestrator:
     async def _execute_payload(self, payload: dict, noise_cost: int,
                                 running_set: set):
         pid = payload.get("id", "")
+        self._active_executor_tasks += 1
         try:
             await self.executor.execute(payload)
         except Exception as e:
             logger.error(f"Executor payload {pid} 失败: {e}", exc_info=True)
         finally:
+            self._active_executor_tasks -= 1
             self._current_noise -= noise_cost
             running_set.discard(pid)
 
     async def _execute_recon_task(self, task: dict, noise_cost: int,
                                    running_set: set):
         task_id = task.get("id", "")
+        self._active_executor_tasks += 1
         try:
             await self.executor.execute_recon(task)
         except Exception as e:
             logger.error(f"Executor recon task {task_id} 失败: {e}", exc_info=True)
         finally:
+            self._active_executor_tasks -= 1
             self._current_noise -= noise_cost
             running_set.discard(task_id)
 
@@ -924,14 +1107,20 @@ class Orchestrator:
                 if target and tool:
                     params_str = json.dumps(payload.get("params", {}), sort_keys=True)
                     import hashlib
-                    h = hashlib.md5(params_str.encode()).hexdigest()[:8]
-                    dedup_key = f"sent_recon:{target}:{tool}:{h}"
+                    # port_scan/nmap: 按 tool:target 去重（忽略 params 差异）
+                    # 防止 LLM 用不同参数（top-1000 vs -p 1-1024 等）绕过去重
+                    _TARGET_LEVEL_DEDUP_TOOLS = {"port_scan", "nmap", "port_scan_full"}
+                    if tool in _TARGET_LEVEL_DEDUP_TOOLS:
+                        cmd_hash = hashlib.md5(f"{tool}:{target}".encode()).hexdigest()[:12]
+                    else:
+                        cmd_hash = hashlib.md5(f"{tool}:{target}:{params_str}".encode()).hexdigest()[:12]
+                    dedup_key = f"sent_recon:{cmd_hash}"
                     
                     if await self.state_api.redis.exists(dedup_key):
                         logger.debug(f"Recon: {dedup_key} 处于冷却期，跳过重复下发")
                         continue
                     
-                    await self.state_api.redis.setex(dedup_key, 1800, "1")
+                    await self.state_api.redis.setex(dedup_key, 600, "1")
 
             await self.state_api.apply_mutation(mutation)
             applied_count += 1
@@ -948,18 +1137,27 @@ class Orchestrator:
             await self._handle_knowledge_queries(knowledge_queries)
             await self._trigger_think(force=True)
             
-        # 如果 Agent 这一轮没有产生任何实际状态改变（比如任务全被过滤了），标记为 STALL
+        # 如果 Agent 这一轮没有产生任何实际状态改变（比如任务全被过滤了）
+        # 且当前没有任何异步 Executor 任务在运行，才标记为真正的 STALL
         if applied_count == 0 and not knowledge_queries:
             current_focus = await self.state_api.get_focus()
             if isinstance(current_focus, dict):
-                current_focus["stall_count"] = int(current_focus.get("stall_count", 0)) + 1
-                self._total_stall_count += 1
-                await self.state_api.apply_mutation(StateMutation(
-                    operation=MutationOperation.WRITE,
-                    domain=StateDomain.FOCUS,
-                    payload=current_focus
-                ))
-                logger.warning(f"检测到空转（Agent未生成有效任务），强制增加 stall={current_focus['stall_count']}")
+                if self._active_executor_tasks == 0:
+                    current_focus["stall_count"] = int(current_focus.get("stall_count", 0)) + 1
+                    self._total_stall_count += 1
+                    await self.state_api.apply_mutation(StateMutation(
+                        operation=MutationOperation.WRITE,
+                        domain=StateDomain.FOCUS,
+                        payload=current_focus
+                    ))
+                    stall_val = current_focus["stall_count"]
+                    logger.warning(f"检测到真正的空转（Agent未生成有效任务且无后台任务），强制增加 stall={stall_val}")
+                    # stall 达到 5 时，标记下次 Think 强制走大模型
+                    if stall_val >= 5 and not self._force_strong_next_think:
+                        self._force_strong_next_think = True
+                        logger.info("🔼 连续空转 ≥5，标记下次 Planner Think 强制使用大模型")
+                else:
+                    logger.debug(f"Agent 未生成新任务，但当前有 {self._active_executor_tasks} 个任务正在执行，不增加 stall")
 
     async def _handle_knowledge_queries(self, mutations: list):
         """拦截 Agent 的知识查询请求，调用 RAG Engine"""
@@ -1100,3 +1298,19 @@ class Orchestrator:
             }
         )
         await self.state_api.apply_mutation(mutation)
+
+    def _is_target_in_scope(self, target: str, scope: list[str]) -> bool:
+        """检查目标是否在授权 scope 内（IP 和域名均支持）"""
+        import ipaddress
+        if not target or not scope:
+            return False
+        ip_str = target.split(":")[0]  # 去掉端口
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+            return any(
+                ip_obj in ipaddress.ip_network(cidr, strict=False)
+                for cidr in scope
+            )
+        except ValueError:
+            # 域名直接匹配
+            return ip_str in scope

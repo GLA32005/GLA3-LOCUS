@@ -326,6 +326,7 @@ async def main():
 
     mission = _load_mission(mission_file)
     await _load_mission_into_state(state_api, mission)
+    await state_api.verify_vector_counts_consistency()
 
     orchestrator, _, report_gen = _build_orchestrator(state_api)
 

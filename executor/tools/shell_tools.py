@@ -65,7 +65,9 @@ class BannerGrabTool(BaseTool):
             # 如果结果包含超时、拒绝连接等错误信息，不应视为有效资产
             _FAIL_PATTERNS = [
                 "Ncat: TIMEOUT", "Connection refused", "No route to host",
-                "Connection timed out", "Network is unreachable"
+                "Connection timed out", "Network is unreachable",
+                "Name or service not known", "Host is down", "Operation timed out",
+                "Connection reset by peer", "No such file or directory"
             ]
             banner = raw_banner
             is_valid = bool(banner)

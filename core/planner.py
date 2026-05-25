@@ -7,7 +7,6 @@ Planner — 状态机大脑
 from __future__ import annotations
 import json
 import logging
-from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,11 @@ PLANNER_SYSTEM = """
 5. 如果 focus.opportunity_flag == true，act.agent 必须是 exploit
 6. 漏洞链思维：当发现多个低/中危漏洞时，评估它们的组合是否构成高危攻击链（如 信息泄露+弱口令=未授权访问，SSRF+文件读取=RCE，文件上传+路径遍历=WebShell）。hypothesis 应包含组合路径
 7. 蜜罐警觉：如果目标 honeypot_suspect=true，立即切换到其他目标
-8. **重要**：请保持 `think` 字段极其简洁（50字以内），优先确保 JSON 结构的完整性，防止因推理过长导致输出截断。
+8. LATERAL 阶段必须在 owned_hosts > 0 之后才能选择，否则必须选 RECON 或 EXPLOIT
+9. EXPLOIT 阶段必须在 active_host.services 不为空之后才能选择，否则必须选 RECON
+10. active_target 字段：如果不需要修改，必须填写当前值，禁止填 null
+11. act.agent 必须从 ["recon", "exploit", "critic", "cleanup"] 中选择，绝不允许使用如 "scanner" 等非法值
+12. **重要**：请保持 `think` 字段极其简洁（50字以内），优先确保 JSON 结构的完整性，防止因推理过长导致输出截断。
 
 ## 输出格式
 {
@@ -55,42 +58,49 @@ class Planner:
                  api_key: str = None, base_url: str = None):
         self.api_key = api_key
         self.base_url = base_url or "http://127.0.0.1:8866"
-        logger.info(f"Planner init: model={model}, base_url={self.base_url}, key_len={len(self.api_key)}")
-        self.client = AsyncAnthropic(api_key=self.api_key, base_url=self.base_url)
-        self.model  = model
+        logger.info(f"Planner init: model={model}, base_url={self.base_url}")
 
-    async def think(self, pruned_view: dict, system_hint: str = None) -> dict:
+    async def think(self, pruned_view: dict, system_hint: str = None,
+                    force_strong: bool = False) -> dict:
         """
         执行一次 Think 节拍。
         输入是 StatePruner 生成的裁剪视图，输出是结构化 Act 指令。
+        force_strong=True 时强制使用大模型（如连续空转或新资产发现）。
         """
         prompt = self._build_prompt(pruned_view, system_hint=system_hint)
 
         try:
-            from core.llm_provider import call_llm_anthropic_style
-            raw, tokens_used = await call_llm_anthropic_style(
-                api_key=self.api_key,
-                base_url=self.base_url,
-                model=self.model,
+            from core.llm_provider import call_llm_with_escalation, parse_robust_json
+
+            def _parse(text):
+                result = parse_robust_json(text)
+                if result is not None and not isinstance(result, dict):
+                    return None
+                return result
+
+            def _conf(parsed):
+                if parsed is None:
+                    return None
+                return float(parsed.get("confidence", 0))
+
+            raw, tokens_used, escalated = await call_llm_with_escalation(
                 system=PLANNER_SYSTEM,
                 prompt=prompt,
-                max_tokens=6000
+                agent_role="planner",
+                confidence_fn=_conf,
+                parse_fn=_parse,
+                max_tokens=6000,
+                force_strong=force_strong,
             )
 
             if not raw.strip():
                 return self._fallback_output()
 
-            from core.llm_provider import parse_robust_json
             output = parse_robust_json(raw)
-            if not output:
+            if not output or not isinstance(output, dict):
                 logger.error(f"Planner 输出非法 JSON 且修复失败: {raw[:200]}...")
                 return self._fallback_output()
-            
-            if not isinstance(output, dict):
-                logger.error(f"Planner: JSON 解析结果不是 dict (type={type(output).__name__}), value={str(output)[:100]}")
-                return self._fallback_output()
 
-            # 调试：打印 Planner 输出的 focus_update 和 act
             logger.debug(
                 f"Planner raw output: "
                 f"act={output.get('act')} "
@@ -98,21 +108,20 @@ class Planner:
                 f"type(fu)={type(output.get('focus_update')).__name__}"
             )
 
-            # 处理 focus 更新
             if output.get("focus_update"):
                 await self._apply_focus_update(
                     output["focus_update"], pruned_view
                 )
 
+            escalated_tag = " [STRONG]" if escalated else ""
             logger.info(
-                f"Planner Think完成: agent={output.get('act', {}).get('agent')} "
+                f"Planner Think完成{escalated_tag}: agent={output.get('act', {}).get('agent')} "
                 f"confidence={output.get('confidence')}"
             )
             return output
 
         except json.JSONDecodeError as e:
             logger.error(f"Planner 输出非法 JSON: {e}")
-            # 返回安全的降级指令：派 Recon 补充情报
             return self._fallback_output()
 
     def _build_prompt(self, view: dict, system_hint: str = None) -> str:

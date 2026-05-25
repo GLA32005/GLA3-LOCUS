@@ -184,24 +184,17 @@ class CleanupAgent(BaseAgent):
             if not raw:
                 return []
             
-            # JSON 提取
             import re
             json_match = re.search(r'(\{.*\}|\[.*\])', raw, re.DOTALL)
             if json_match:
                 raw = json_match.group(1).strip()
             
-            return json.loads(raw).get("tasks", [])
-        except Exception as e:
-            logger.error(f"CleanupAgent LLM 失败: {e}")
-            return []
-
-        try:
             llm_out = json.loads(raw)
-        except json.JSONDecodeError as e:
-            logger.error(f"CleanupAgent JSON parse error: {e} — raw: {raw[:200]}")
+            tasks = llm_out.get("tasks", [])
+        except Exception as e:
+            logger.error(f"CleanupAgent LLM 失败或 JSON 解析失败: {e} — raw: {raw[:200] if 'raw' in locals() else ''}")
             return []
 
-        tasks = llm_out.get("tasks", [])
         scope_set = set(mission.get("scope", []))
 
         validated = []

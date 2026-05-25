@@ -253,6 +253,13 @@ async def get_progress(state_api=Depends(_get_state_api)):
         vectors = await state_api.get_vectors_summary()
         done_tasks = await state_api.get_done_tasks()
 
+        # LLM 升级统计
+        try:
+            from core.llm_provider import get_llm_stats
+            llm_stats = get_llm_stats()
+        except Exception:
+            llm_stats = {}
+
         # 计算进度百分比（基于 mission scope 预估）
         mission = await state_api.get_mission()
         scope_ips = sum(
@@ -284,6 +291,7 @@ async def get_progress(state_api=Depends(_get_state_api)):
                 "vectors_success": vectors.get("success_count", 0),
             },
             "pending_tasks": len(done_tasks),
+            "llm_stats": llm_stats,
         }
     except Exception as e:
         logger.error(f"Progress endpoint error: {e}")

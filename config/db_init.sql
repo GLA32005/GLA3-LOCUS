@@ -31,19 +31,7 @@ CREATE TABLE IF NOT EXISTS tried_vectors
                     'UNKNOWN'        = 6,
                     'TIMEOUT'        = 7
                   ),
-    fail_reason   Enum8(
-                    'PATCHED'           = 1,
-                    'WAF_BLOCKED'       = 2,
-                    'VERSION_MISMATCH'  = 3,
-                    'HALLUCINATION'     = 4,
-                    'CRITIC_BLOCKED'    = 5,
-                    'MAX_RETRY'         = 6,
-                    'OUT_OF_SCOPE'      = 7,
-                    'DOS_RISK'          = 8,
-                    'SYNTAX_ERROR'      = 9,
-                    'HIGH_NOISE'        = 10,
-                    'UNKNOWN'           = 11
-                  ),
+    fail_reason   String,
     info_gain     Float32 DEFAULT 0.0,      -- 0.0~1.0，情报价值
     novelty       Float32 DEFAULT 1.0,      -- 新颖度，已试过的会衰减
     retry_count   UInt8   DEFAULT 0,
@@ -84,6 +72,17 @@ CREATE TABLE IF NOT EXISTS footprints
 ENGINE = MergeTree()
 PARTITION BY toYYYYMMDD(ts)
 ORDER BY (target, type, ts);
+
+
+-- cleaned_footprints 表
+-- 遵循约束②：记录已清理的痕迹 ID，而不是修改 footprints 表
+CREATE TABLE IF NOT EXISTS cleaned_footprints
+(
+    id          UUID,
+    ts          DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+ORDER BY (id, ts);
 
 
 -- ══════════════════════════════════════════════════════
