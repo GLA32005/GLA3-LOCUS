@@ -6,9 +6,10 @@
 mission:
   goal: "获取内网核心数据库服务器权限"
 
-  # 授权范围 CIDR（严格限制，越界自动拒绝）
+  # 授权范围 CIDR 或域名（严格限制，越界自动拒绝）
   scope:
-    - "www.sxsdyzx.cn"
+    - "192.168.1.0/24"
+    - "example.com"
 
   # 明确禁止的目标（Out of Bounds）
   oob:
