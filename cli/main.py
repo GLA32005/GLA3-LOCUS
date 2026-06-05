@@ -52,8 +52,22 @@ def _get_service_manager(config=None):
 # 顶层命令组
 # ═══════════════════════════════════════════════════════════
 
-@click.group(invoke_without_command=True)
-@click.version_option("0.1.0", prog_name="locus")
+class ChineseHelpCommand(click.Command):
+    def get_help(self, ctx):
+        return super().get_help(ctx).replace("Usage:", "用法:").replace("Options:", "选项:").replace("Commands:", "命令:").replace("Show this message and exit.", "显示此帮助信息并退出。")
+
+class ChineseHelpGroup(click.Group):
+    def get_help(self, ctx):
+        return super().get_help(ctx).replace("Usage:", "用法:").replace("Options:", "选项:").replace("Commands:", "命令:").replace("Show this message and exit.", "显示此帮助信息并退出。")
+    def command(self, *args, **kwargs):
+        kwargs.setdefault("cls", ChineseHelpCommand)
+        return super().command(*args, **kwargs)
+    def group(self, *args, **kwargs):
+        kwargs.setdefault("cls", ChineseHelpGroup)
+        return super().group(*args, **kwargs)
+
+@click.group(cls=ChineseHelpGroup, invoke_without_command=True)
+@click.version_option("0.1.0", prog_name="locus", message="%(prog)s 版本 %(version)s", help="显示版本信息并退出。")
 @click.pass_context
 def cli(ctx):
     """LOCUS — Autonomous Agentic Pentest Framework
