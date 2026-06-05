@@ -66,6 +66,13 @@ def cli(ctx):
         click.echo(ctx.get_help())
 
 
+@cli.command("help")
+@click.pass_context
+def help_cmd(ctx):
+    """显示可用命令与帮助信息"""
+    click.echo(ctx.parent.get_help())
+
+
 # ═══════════════════════════════════════════════════════════
 # scan — 核心扫描命令
 # ═══════════════════════════════════════════════════════════
