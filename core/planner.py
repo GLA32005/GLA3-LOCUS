@@ -79,9 +79,49 @@ class Planner:
                 return result
 
             def _conf(parsed):
+                """客观结构评分：检查输出与当前状态的一致性"""
                 if parsed is None:
                     return None
-                return float(parsed.get("confidence", 0))
+                import ipaddress as _ipa
+                score = 0.0
+                act = parsed.get("act", {})
+
+                # 1. act.agent 合法 (0.3)
+                if isinstance(act, dict) and act.get("agent") in ("recon", "exploit", "critic", "cleanup"):
+                    score += 0.3
+
+                # 2. 状态一致性 (0.2)
+                services = pruned_view.get("assets", {}).get("active_host", {}).get("services", [])
+                agent = act.get("agent", "") if isinstance(act, dict) else ""
+                if agent == "exploit" and not services:
+                    score -= 0.5  # 无服务却要 exploit = 逻辑矛盾
+                elif agent == "recon" and not services:
+                    score += 0.2  # 正确：先侦察
+
+                # 3. hypothesis 有实质内容 (0.2)
+                hyp = parsed.get("hypothesis", "")
+                if isinstance(hyp, str) and len(hyp) > 10 and "TODO" not in hyp and "待定" not in hyp:
+                    score += 0.2
+
+                # 4. active_target 在 scope 内 (0.3)
+                fu = parsed.get("focus_update") or {}
+                target = fu.get("active_target") if isinstance(fu, dict) else None
+                scope = pruned_view.get("mission", {}).get("scope_expanded", [])
+                if target and scope:
+                    try:
+                        ip = _ipa.ip_address(target.split(":")[0])
+                        if any(ip in _ipa.ip_network(c, strict=False) for c in scope if "/" in c or c.count(".") == 3):
+                            score += 0.3
+                        else:
+                            score -= 0.8  # 越界目标，强惩罚
+                    except ValueError:
+                        if target in scope:
+                            score += 0.3
+                        # 域名不在 scope 也不额外扣分（可能是子域名）
+                elif not target:
+                    score += 0.1  # 未改 target，可接受
+
+                return max(0.0, min(1.0, score))
 
             raw, tokens_used, escalated = await call_llm_with_escalation(
                 system=PLANNER_SYSTEM,

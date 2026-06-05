@@ -1,0 +1,15 @@
+[project]
+name = "locus-pentest"
+version = "0.1.0"
+description = "Autonomous agentic penetration testing framework"
+requires-python = ">=3.11"
+
+[project.scripts]
+locus = "cli.main:cli"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["core*", "agents*", "executor*", "memory*", "api*", "cli*"]

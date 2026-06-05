@@ -12,7 +12,7 @@ LLM Provider — 统一 LLM 访问适配层
 
 API 格式自动适配：
   - Anthropic 风格: /v1/messages
-  - OpenAI 风格:    /v1/chat/completions
+  - OpenAI 风格:    /chat/completions
 """
 
 import asyncio
@@ -25,23 +25,29 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-# ── 双模型配置 ────────────────────────────────────────────────
+from core.config_manager import ConfigManager
 
-LOCAL_CONFIG = {
-    "base_url":   os.getenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8866"),
-    "api_key":    os.getenv("ANTHROPIC_API_KEY", "local"),
-    "model":      os.getenv("LOCAL_MODEL", "Qwen3.5-9B-MLX-8bit"),
-    "api_format": os.getenv("LOCAL_API_FORMAT", "anthropic"),  # anthropic | openai
-    "max_tokens": 1200,
-}
+# ── 双模型配置（延迟求值，实时从 ConfigManager 获取）──
 
-STRONG_CONFIG = {
-    "base_url":   os.getenv("STRONG_BASE_URL", ""),
-    "api_key":    os.getenv("STRONG_API_KEY", ""),
-    "model":      os.getenv("STRONG_MODEL", "deepseek-chat"),
-    "api_format": os.getenv("STRONG_API_FORMAT", ""),  # 空=自动检测
-    "max_tokens": 2000,
-}
+def _get_local_config() -> dict:
+    cfg = ConfigManager().get_all().get("llm", {})
+    return {
+        "base_url":   cfg.get("base_url", "http://127.0.0.1:8866"),
+        "api_key":    cfg.get("api_key", "localkey"),
+        "model":      cfg.get("model", "Qwen3.5-9B-MLX-8bit"),
+        "api_format": cfg.get("api_format", ""),  # 空 = 自动检测
+        "max_tokens": 1200,
+    }
+
+def _get_strong_config() -> dict:
+    cfg = ConfigManager().get_all().get("llm", {})
+    return {
+        "base_url":   cfg.get("strong_base_url", ""),
+        "api_key":    cfg.get("strong_api_key", ""),
+        "model":      cfg.get("strong_model", "deepseek-v4-flash"),
+        "api_format": cfg.get("strong_api_format", ""),
+        "max_tokens": 2000,
+    }
 
 
 # ── 各 Agent 的升级阈值 ──────────────────────────────────────
@@ -49,21 +55,25 @@ STRONG_CONFIG = {
 ESCALATION_CONFIG = {
     "planner": {
         "threshold": 0.6,
+        "garbage_threshold": 0.3,  # 低于此分直接丢弃，不升级
         "max_local_retries": 1,
         "escalate_on_parse_fail": True,
     },
     "exploit": {
         "threshold": 0.7,
+        "garbage_threshold": 0.3,
         "max_local_retries": 1,
         "escalate_on_parse_fail": True,
     },
     "recon": {
-        "threshold": 0.4,
+        "threshold": 0.5,
+        "garbage_threshold": 0.2,
         "max_local_retries": 2,
         "escalate_on_parse_fail": False,
     },
     "critic": {
-        "threshold": 0.5,
+        "threshold": 0.0,          # Critic 有硬编码规则兜底，不需要升级
+        "garbage_threshold": 0.0,
         "max_local_retries": 2,
         "escalate_on_parse_fail": False,
     },
@@ -74,7 +84,7 @@ ESCALATION_CONFIG = {
 
 _local_calls: int = 0
 _escalation_counts: dict[str, int] = {}
-_strong_budget = int(os.getenv("STRONG_BUDGET", "20"))
+_strong_budget = int(ConfigManager().get_all().get("llm", {}).get("strong_budget", 20))
 _strong_budget_used: int = 0
 
 
@@ -100,14 +110,18 @@ def reset_llm_stats():
 # ── API 格式检测 ──────────────────────────────────────────────
 
 def _detect_api_format(config: dict) -> str:
-    """通过 base_url 自动检测 API 格式"""
+    """通过显式配置或 base_url 自动检测 API 格式"""
     fmt = config.get("api_format", "").strip()
     if fmt in ("anthropic", "openai"):
         return fmt
+    # 未显式配置 → 根据 URL 自动判断
     url = config.get("base_url", "").lower()
-    if any(k in url for k in ("openai", "deepseek", "together", "groq", "fireworks")):
+    if any(k in url for k in ("openai", "deepseek", "together", "groq", "fireworks", "siliconflow")):
         return "openai"
-    return "anthropic"
+    # 本地服务 (localhost/127.0.0.1) 默认 anthropic（兼容 LM Studio 等）
+    if any(k in url for k in ("localhost", "127.0.0.1", "0.0.0.0")):
+        return "anthropic"
+    return "openai"  # 公网 API 默认 OpenAI 格式（更通用）
 
 
 # ── 核心调用函数 ──────────────────────────────────────────────
@@ -129,14 +143,34 @@ async def call_llm(
         if _strong_budget_used < _strong_budget:
             _strong_budget_used += 1
             _escalation_counts[agent_role] = _escalation_counts.get(agent_role, 0) + 1
-            logger.info(f"[{agent_role}] 🔼 强制升级大模型 (累计第 {_escalation_counts[agent_role]} 次)")
-            text, tokens = await _call_single(system, prompt, STRONG_CONFIG, max_tokens)
+            local_cfg = _get_local_config()
+            strong_cfg = _get_strong_config()
+            logger.warning(
+                f"[{agent_role}] 🔼 强制切换到大模型 | "
+                f"模型: {local_cfg['model']} → {strong_cfg['model']} | "
+                f"累计升级: {_escalation_counts[agent_role]} 次 "
+                f"(预算 {_strong_budget_used}/{_strong_budget})"
+            )
+            text, tokens = await _call_single(system, prompt, strong_cfg, max_tokens)
+            if text.strip():
+                logger.warning(
+                    f"[{agent_role}] ✅ 大模型已响应 | "
+                    f"模型: {strong_cfg['model']} | tokens={tokens}"
+                )
+            else:
+                logger.error(
+                    f"[{agent_role}] ❌ 大模型也返回空响应 | "
+                    f"模型: {strong_cfg['model']}"
+                )
             return text, tokens, True
         else:
-            logger.warning(f"[{agent_role}] 大模型预算已用完 ({_strong_budget_used}/{_strong_budget})，回退本地")
+            logger.warning(
+                f"[{agent_role}] 需要强制升级，但大模型预算已用完 "
+                f"({_strong_budget_used}/{_strong_budget})，回退本地"
+            )
 
     _local_calls += 1
-    text, tokens = await _call_single(system, prompt, LOCAL_CONFIG, max_tokens)
+    text, tokens = await _call_single(system, prompt, _get_local_config(), max_tokens)
     return text, tokens, False
 
 
@@ -173,7 +207,7 @@ async def call_llm_with_escalation(
     # ── 本地重试 ──
     for attempt in range(max_retries + 1):
         _local_calls += 1
-        text, tokens = await _call_single(system, prompt, LOCAL_CONFIG, max_tokens)
+        text, tokens = await _call_single(system, prompt, _get_local_config(), max_tokens)
         last_text = text
         last_tokens = tokens
 
@@ -196,15 +230,24 @@ async def call_llm_with_escalation(
 
         conf = confidence_fn(parsed)
         if conf is not None and conf >= threshold:
-            logger.debug(f"[{agent_role}] 本地置信度 {conf:.2f} ≥ {threshold}，无需升级")
+            logger.debug(f"[{agent_role}] 输出质量分 {conf:.2f} ≥ {threshold}，无需升级")
             return text, tokens, False
 
         if conf is not None:
+            # 垃圾拦截：质量分极低 = 输出是幻觉/废话，升级也没用，直接丢弃
+            garbage_threshold = cfg.get("garbage_threshold", 0.3)
+            if conf < garbage_threshold:
+                logger.warning(
+                    f"[{agent_role}] ⛔ 输出质量分 {conf:.2f} < 垃圾阈值 {garbage_threshold}，"
+                    f"直接丢弃（不升级、不执行）"
+                )
+                return "", 0, False
+
             logger.info(
-                f"[{agent_role}] 本地置信度 {conf:.2f} < {threshold}，"
+                f"[{agent_role}] 输出质量分 {conf:.2f} < {threshold}，"
                 f"attempt={attempt + 1}/{max_retries + 1}"
             )
-            escalate_reason = f"置信度 {conf:.2f} < {threshold}"
+            escalate_reason = f"质量分 {conf:.2f} < {threshold}"
 
         if attempt < max_retries:
             continue
@@ -214,18 +257,38 @@ async def call_llm_with_escalation(
     if should_escalate and _is_strong_available() and _strong_budget_used < _strong_budget:
         _strong_budget_used += 1
         _escalation_counts[agent_role] = _escalation_counts.get(agent_role, 0) + 1
-        logger.info(
-            f"[{agent_role}] 🔼 升级大模型: {escalate_reason} "
-            f"(累计第 {_escalation_counts[agent_role]} 次)"
+        strong_cfg = _get_strong_config()
+        logger.warning(
+            f"[{agent_role}] 🔼 本地模型能力不足，切换到大模型 | "
+            f"原因: {escalate_reason} | "
+            f"模型: {_get_local_config()['model']} → {strong_cfg['model']} | "
+            f"累计升级: {_escalation_counts[agent_role]} 次 "
+            f"(预算 {_strong_budget_used}/{_strong_budget})"
         )
-        text, tokens = await _call_single(system, prompt, STRONG_CONFIG, max_tokens)
+        text, tokens = await _call_single(system, prompt, strong_cfg, max_tokens)
+        if text.strip():
+            logger.warning(
+                f"[{agent_role}] ✅ 大模型已响应 | "
+                f"模型: {strong_cfg['model']} | tokens={tokens}"
+            )
+        else:
+            logger.error(
+                f"[{agent_role}] ❌ 大模型也返回空响应 | "
+                f"模型: {strong_cfg['model']}"
+            )
         return text, tokens, True
 
     if should_escalate:
         if not _is_strong_available():
-            logger.debug(f"[{agent_role}] 需要升级但 STRONG 未配置，返回本地结果")
+            logger.warning(
+                f"[{agent_role}] ⚠️ 本地模型能力不足({escalate_reason})，"
+                f"但 STRONG 模型未配置，降级使用本地结果"
+            )
         else:
-            logger.warning(f"[{agent_role}] 需要升级但预算已用完，返回本地结果")
+            logger.warning(
+                f"[{agent_role}] ⚠️ 本地模型能力不足({escalate_reason})，"
+                f"但大模型预算已用完 ({_strong_budget_used}/{_strong_budget})，降级使用本地结果"
+            )
 
     return last_text, last_tokens, False
 
@@ -257,14 +320,18 @@ async def _call_anthropic(
         "system": system,
         "messages": [{"role": "user", "content": prompt}],
     }
-    url = f"{config['base_url'].rstrip('/')}/v1/messages"
+    base_url = config['base_url'].rstrip('/')
+    if base_url.endswith("/v1"):
+        url = f"{base_url}/messages"
+    else:
+        url = f"{base_url}/v1/messages"
     return await _do_request(url, headers, payload, _parse_anthropic_response)
 
 
 async def _call_openai(
     system: str, prompt: str, config: dict, max_tokens: int
 ) -> tuple[str, int]:
-    """OpenAI 风格 API: /v1/chat/completions"""
+    """OpenAI 风格 API: /chat/completions"""
     headers = {
         "Authorization": f"Bearer {config['api_key'] or ''}",
         "Content-Type": "application/json",
@@ -277,7 +344,22 @@ async def _call_openai(
             {"role": "user", "content": prompt},
         ],
     }
-    url = f"{config['base_url'].rstrip('/')}/v1/chat/completions"
+
+    base_url = config['base_url'].rstrip('/')
+    model = config.get('model', '').lower()
+
+    # ✅ 修正路径拼接：DeepSeek 官方 OpenAI 路径 (https://api.deepseek.com/chat/completions) 不需要 /v1
+    # 这一修改修正了向 DeepSeek 发送请求时因多出 /v1 导致的 404 错误。
+    if "deepseek" in model:
+        # DeepSeek 路径：https://api.deepseek.com/chat/completions
+        url = f"{base_url}/chat/completions"
+    else:
+        # 兼容 base_url 本身带 /v1 的情况 (如 LM Studio: http://127.0.0.1:1234/v1)
+        if base_url.endswith("/v1"):
+            url = f"{base_url}/chat/completions"
+        else:
+            url = f"{base_url}/v1/chat/completions"
+
     return await _do_request(url, headers, payload, _parse_openai_response)
 
 
@@ -329,7 +411,8 @@ def _parse_openai_response(data: dict) -> tuple[str, int]:
 
 
 def _is_strong_available() -> bool:
-    return bool(STRONG_CONFIG.get("api_key") and STRONG_CONFIG.get("base_url"))
+    cfg = _get_strong_config()
+    return bool(cfg.get("api_key") and cfg.get("base_url"))
 
 
 # ── 旧接口兼容（call_llm_anthropic_style）────────────────────
@@ -343,11 +426,11 @@ async def call_llm_anthropic_style(
     prompt: str,
     max_tokens: int = 1500,
 ) -> tuple[str, int]:
-    """向后兼容的 Anthropic 风格调用"""
+    """向后兼容的调用（自动检测 API 格式）"""
     global _local_calls
     _local_calls += 1
-    config = {"api_key": api_key, "base_url": base_url, "model": model, "api_format": "anthropic"}
-    return await _call_anthropic(system, prompt, config, max_tokens)
+    config = {"api_key": api_key, "base_url": base_url, "model": model}
+    return await _call_single(system, prompt, config, max_tokens)
 
 
 # ── JSON 解析 ─────────────────────────────────────────────────
@@ -442,24 +525,39 @@ async def check_vision_support(
     api_key: str, base_url: str, model: str
 ) -> bool:
     """探测当前模型是否支持 Vision"""
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json"
-    }
-    payload = {
-        "model": model,
-        "max_tokens": 10,
-        "messages": [{
-            "role": "user", 
-            "content": [
+    config = {"api_key": api_key, "base_url": base_url, "model": model}
+    fmt = _detect_api_format(config)
+
+    if fmt == "openai":
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "Is this an image?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="}}
+            ]}],
+        }
+        url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    else:
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": [
                 {"type": "text", "text": "Is this an image?"},
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="}}
-            ]
-        }]
-    }
-    
-    url = f"{base_url.rstrip('/')}/v1/messages"
+            ]}],
+        }
+        url = f"{base_url.rstrip('/')}/v1/messages"
+
     try:
         async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
             resp = await client.post(url, headers=headers, json=payload)

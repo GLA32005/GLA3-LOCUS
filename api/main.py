@@ -367,6 +367,23 @@ async def generate_report(
     }
 
 
+# ── 系统控制端点 (Pause/Resume) ───────────────────────────────
+
+@app.post("/pause",
+          summary="挂起系统 (暂停 Planner 的继续思考)",
+          dependencies=[Depends(_require_key)])
+async def pause_system(state_api=Depends(_get_state_api)):
+    await state_api.set_paused(True)
+    return {"status": "paused"}
+
+@app.post("/resume",
+          summary="恢复系统运行",
+          dependencies=[Depends(_require_key)])
+async def resume_system(state_api=Depends(_get_state_api)):
+    await state_api.set_paused(False)
+    return {"status": "resumed"}
+
+
 # ── 启动入口（直接运行 uvicorn）──────────────────────────────
 
 if __name__ == "__main__":

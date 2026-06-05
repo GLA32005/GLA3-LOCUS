@@ -132,11 +132,31 @@ class ReconAgent(BaseAgent):
         events: list[Event] = []
 
         # 1. 尝试启发式规则 (Issue 6)
-        heuristic_tasks = self._apply_heuristic_rules(view)
+        stall_count = view.get("focus", {}).get("stall_count", 0)
+        if stall_count >= 2:
+            heuristic_tasks = []
+            logger.info(f"ReconAgent: 处于空转状态 (stall={stall_count})，禁用启发式规则，强制使用大模型推理")
+        else:
+            heuristic_tasks = self._apply_heuristic_rules(view)
         
         # 如果启发式规则已经生成了足够的任务，且不是关键阶段，可以跳过 LLM 推理以节省时间和 Token
         # 判定标准：启发式任务 >= 3 且没有 active_target 的关键变动请求
         skip_llm = len(heuristic_tasks) >= 3 and not view.get("focus", {}).get("opportunity_flag")
+        
+        # 问题 #3 修复：启发式任务先自查 dedup 状态
+        # 如果全部会被去重过滤，则不跳过 LLM（否则死循环空转）
+        if skip_llm:
+            existing_tasks = view.get("pending_recon_list", [])
+            existing_keys = {
+                (t.get("target", ""), t.get("tool", ""))
+                for t in existing_tasks
+                if t.get("status") in ("PENDING", "RUNNING")
+            }
+            deduped = [t for t in heuristic_tasks
+                       if (t.get("target", ""), t.get("tool", "port_scan")) not in existing_keys]
+            if not deduped:
+                skip_llm = False
+                logger.info("ReconAgent: 启发式任务全部重复，回退到 LLM 推理")
         
         if skip_llm:
             llm_out = {
@@ -150,7 +170,7 @@ class ReconAgent(BaseAgent):
         else:
             # LLM 推理
             prompt = self._build_prompt(view, input.trigger_event)
-            llm_out, tokens_used = await self._call_llm(prompt)
+            llm_out, tokens_used = await self._call_llm(prompt, state_view=view)
             # 合并结果
             llm_out["tasks"] = heuristic_tasks + llm_out.get("tasks", [])
 
@@ -179,6 +199,15 @@ class ReconAgent(BaseAgent):
 
         # 限制单轮任务数
         raw_tasks = raw_tasks[:MAX_TASKS_PER_RUN]
+
+        # 清洗 target (Issue 4)
+        for t in raw_tasks:
+            target = t.get("target", "")
+            if isinstance(target, str):
+                if target.startswith("http://"): target = target[7:]
+                if target.startswith("https://"): target = target[8:]
+                target = target.split("/")[0] # strip path
+                t["target"] = target
 
         # 硬编码 scope 验证与不可达拦截（LLM 不可信）
         mission_data = view.get("mission", {})
@@ -284,19 +313,46 @@ class ReconAgent(BaseAgent):
 
     # ── LLM 调用 ─────────────────────────────────────────────
 
-    async def _call_llm(self, prompt: str) -> tuple[dict, int]:
+    async def _call_llm(self, prompt: str, state_view: dict = None) -> tuple[dict, int]:
         try:
             from core.llm_provider import call_llm_with_escalation, parse_robust_json
 
             def _parse(text):
                 return parse_robust_json(text)
 
+            _VALID_TOOLS = {"port_scan", "banner_grab", "http_probe", "dir_enum",
+                           "vuln_scan", "service_enum", "smb_enum", "ldap_enum",
+                           "cred_spray", "screenshot", "nmap", "port_scan_full"}
+
             def _conf(parsed):
+                """客观质量评分：检查任务是否有效可执行"""
                 if parsed is None:
                     return None
-                # recon 输出没有 confidence 字段，统一返回 1.0 跳过置信度检查
-                # 升级只在解析失败时触发
-                return 1.0
+                tasks = parsed.get("tasks", [])
+                if not tasks:
+                    return 0.0
+
+                scope = []
+                if state_view:
+                    mission = state_view.get("mission", {})
+                    scope = mission.get("scope_expanded", mission.get("scope", []))
+
+                valid_count = 0
+                for t in tasks:
+                    tool_ok = t.get("tool") in _VALID_TOOLS
+                    target = t.get("target", "")
+                    target_ok = (not scope) or any(
+                        target == s or target.split(":")[0] == s for s in scope
+                    )
+                    if tool_ok and target_ok:
+                        valid_count += 1
+
+                ratio = valid_count / len(tasks)
+                # 奖励多样性
+                tool_types = {t.get("tool") for t in tasks}
+                diversity = min(len(tool_types) / 3, 0.2)
+
+                return min(1.0, ratio * 0.8 + diversity)
 
             raw, tokens, escalated = await call_llm_with_escalation(
                 system=_SYSTEM_PROMPT,
@@ -390,6 +446,14 @@ class ReconAgent(BaseAgent):
                     f"confidence={float(h.get('confidence') or 0):.2f}"
                 )
             lines.append("")
+
+        # 近期已完成侦察任务
+        completed_recon = view.get("completed_recon_list", [])
+        if completed_recon:
+            lines.append("**近期已完成的侦察任务**:")
+            for t in completed_recon:
+                lines.append(f"  - 工具: {t.get('tool')} | 目标: {t.get('target')} | 状态: {t.get('status')} | 发现新资产: {t.get('assets', 0)}")
+            lines.append("  *注意：绝对不要重复下发已经完成（或超时、失败）且目标和工具相同的侦察任务，否则会导致死循环。*\n")
 
         # tried_vectors 摘要（避免重复侦察）
         vs = view.get("vectors_summary", {})

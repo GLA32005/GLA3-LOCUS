@@ -142,9 +142,18 @@ class StateAPI:
     async def close(self):
         """关闭所有外部连接"""
         if hasattr(self, 'redis'):
-            await self.redis.close()
+            await self.redis.aclose()
         if hasattr(self, 'neo4j'):
             self.neo4j.close()
+            
+    # ── Orchestrator 控制状态 ─────────────────────────────────
+
+    async def is_paused(self) -> bool:
+        val = await self.redis.get("system:paused")
+        return val == "1"
+
+    async def set_paused(self, paused: bool):
+        await self.redis.set("system:paused", "1" if paused else "0")
 
     # ── focus 读写 ────────────────────────────────────────────
 
@@ -665,7 +674,7 @@ class StateAPI:
     def _is_in_scope(self, ip: str, mission: dict) -> bool:
         """检查 IP 是否在授权 scope 内（约束①）"""
         import ipaddress
-        scope = mission.get("scope", [])
+        scope = mission.get("scope_expanded", mission.get("scope", []))
         try:
             ip_obj = ipaddress.ip_address(ip)
             for cidr in scope:

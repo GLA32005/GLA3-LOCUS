@@ -359,6 +359,21 @@ class Executor:
                 )
             )
 
+        # 无论成功/失败，都发 TASK_COMPLETED 让 Orchestrator 感知 exploit 结果
+        await self.event_bus.publish(
+            Event.task_completed(
+                task_id=payload_id,
+                result={
+                    "tool":         hint,
+                    "target":       target,
+                    "assets_found": len(tool_result.assets),
+                    "duration_ms":  duration_ms,
+                    "status":       "FAILED" if not tool_result.success else "DONE",
+                    "is_exploit":   True,
+                },
+            )
+        )
+
         await self._update_payload_status(payload_id, PayloadStatus.DONE)
         logger.info(
             f"Executor: payload={payload_id} target={target} "
@@ -409,14 +424,16 @@ class Executor:
             await self._update_recon_status(task_id, TaskStatus.TIMEOUT)
             
             # A2 修复：所有工具超时都计入目标超时计数（不限 nmap）
-            self._host_timeouts[target] = self._host_timeouts.get(target, 0) + 1
-            if self._host_timeouts[target] >= 3:
-                logger.error(f"目标 {target} 连续 3 次扫描超时，标记为 UNREACHABLE")
+            # 问题 #7 修复：按纯 IP 聚合超时计数（不同端口的超时应合并计数）
+            ip_only = target.split(":")[0]
+            self._host_timeouts[ip_only] = self._host_timeouts.get(ip_only, 0) + 1
+            if self._host_timeouts[ip_only] >= 3:
+                logger.error(f"目标 {ip_only} 连续 3 次扫描超时，标记为 UNREACHABLE")
                 await self.event_bus.publish(Event(
                     type=EventType.TARGET_UNREACHABLE,
                     priority=EventPriority.HIGH,
                     source="executor",
-                    payload={"target": target, "reason": "Consecutive timeouts"}
+                    payload={"target": ip_only, "reason": "Consecutive timeouts"}
                 ))
 
             # A2 修复：超时也发送 TASK_COMPLETED，让 Orchestrator 感知任务结束
@@ -439,11 +456,13 @@ class Executor:
             return
 
         # ── 写入发现的资产 ────────────────────────────────────
+        new_asset_count = 0  # 问题 #6 修复：只计首次发现的新资产
         for asset in tool_result.assets:
             await self._upsert_asset(asset)
             ip = asset.get("ip", "")
             if ip and ip not in self._discovered_ips:
                 self._discovered_ips.add(ip)
+                new_asset_count += 1
                 await self.event_bus.publish(Event(
                     type=EventType.ASSET_DISCOVERED,
                     priority=EventPriority.HIGH,
@@ -476,7 +495,7 @@ class Executor:
                 result={
                     "tool":          tool_name,
                     "target":        target,
-                    "assets_found":  len(tool_result.assets),
+                    "assets_found":  new_asset_count,
                     "info_gain":     tool_result.info_gain,
                     "duration_ms":   tool_result.duration_ms,
                     "status":        str(tool_result.raw.get("status", "")),
@@ -487,7 +506,7 @@ class Executor:
 
         logger.info(
             f"Executor: recon task={task_id} tool={tool_name} target={target} "
-            f"assets={len(tool_result.assets)} "
+            f"assets={new_asset_count} "
             f"duration={tool_result.duration_ms}ms"
         )
 

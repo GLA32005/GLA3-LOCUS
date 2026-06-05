@@ -87,13 +87,22 @@ class StatePruner:
 
         # ── 6b. pending recon 任务列表（精简，供 Recon Agent 去重）──
         pending_recon = await state_api.get_pending_recon_tasks()
-        running_recon = [
-            t for t in await state_api._get_items_by_index("idx:recon_task_ids", "recon_task:")
-            if t.get("status") == TaskStatus.RUNNING
-        ]
+        all_recon = await state_api._get_items_by_index("idx:recon_task_ids", "recon_task:")
+        
+        running_recon = [t for t in all_recon if t.get("status") == TaskStatus.RUNNING]
         view["pending_recon_list"] = [
             {"target": t.get("target"), "tool": t.get("tool"), "status": t.get("status")}
             for t in (pending_recon + running_recon)
+        ]
+
+        completed_recon = [
+            t for t in all_recon 
+            if t.get("status") in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.TIMEOUT)
+        ]
+        completed_recon = sorted(completed_recon, key=lambda x: x.get("updated_at", 0), reverse=True)[:15]
+        view["completed_recon_list"] = [
+            {"target": t.get("target"), "tool": t.get("tool"), "status": t.get("status"), "assets": t.get("assets_found", 0)}
+            for t in completed_recon
         ]
 
         # ── 7. 横向移动机会（Cypher 查询结果）───────────────

@@ -275,10 +275,36 @@ class CriticAgent(BaseAgent):
                     return parse_robust_json(text)
 
             def _conf(parsed):
+                """客观质量评分：检查评分结构完整性"""
                 if parsed is None:
                     return None
-                # critic 输出没有 confidence，不基于置信度升级
-                return 1.0
+                score = 0.0
+
+                # 1. scores 四维齐全 (0.4)
+                scores = parsed.get("scores", {})
+                if isinstance(scores, dict):
+                    dims = {"noise", "stability", "destructiveness", "compliance"}
+                    present = sum(1 for d in dims if d in scores)
+                    score += 0.4 * (present / len(dims))
+
+                    # 数值在 0~1 范围内
+                    all_valid = all(
+                        isinstance(scores.get(d), (int, float)) and 0 <= scores.get(d, -1) <= 1
+                        for d in dims if d in scores
+                    )
+                    if all_valid and present == len(dims):
+                        score += 0.2
+
+                # 2. verdict 合法枚举 (0.3)
+                verdict = parsed.get("verdict", "")
+                if verdict in ("APPROVED", "BLOCKED", "REQUIRES_APPROVAL"):
+                    score += 0.3
+
+                # 3. think 非空 (0.1)
+                if parsed.get("think"):
+                    score += 0.1
+
+                return min(1.0, score)
 
             raw, tokens, escalated = await call_llm_with_escalation(
                 system=_CRITIC_SYSTEM,

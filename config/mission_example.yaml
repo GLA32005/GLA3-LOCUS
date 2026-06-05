@@ -8,7 +8,7 @@ mission:
 
   # 授权范围 CIDR（严格限制，越界自动拒绝）
   scope:
-    - "shop.10086.cn"
+    - "www.sxsdyzx.cn"
 
   # 明确禁止的目标（Out of Bounds）
   oob:

@@ -55,12 +55,9 @@ from memory.rag_engine import RAGEngine
 from core.report_generator import ReportGenerator
 from api.main import app as fastapi_app, register_state_api, register_report_generator
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
-)
+from core.log_config import setup_logging
+setup_logging(logging.INFO)
 logger = logging.getLogger(__name__)
-logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
 
 
 # ── 环境变量读取 ─────────────────────────────────────────────
@@ -82,15 +79,18 @@ CH_DATABASE      = _env("CLICKHOUSE_DB",    "pentest")
 MISSION_FILE     = _env("MISSION_FILE",     "config/mission_example.yaml")
 API_HOST         = _env("API_HOST",         "0.0.0.0")
 API_PORT         = int(os.environ.get("API_PORT", "8086"))
-LLM_MODEL        = _env("LLM_MODEL",        "claude-sonnet-4-20250514")
-ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL")
-ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY")
+LLM_MODEL        = _env("LOCAL_MODEL", _env("LLM_MODEL", "Qwen3.5-9B-MLX-8bit"))
+LLM_BASE_URL     = os.environ.get("LLM_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL")
+LLM_API_KEY      = os.environ.get("LLM_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+# 向后兼容的别名（供下面传参使用）
+ANTHROPIC_BASE_URL = LLM_BASE_URL
+ANTHROPIC_API_KEY  = LLM_API_KEY
 
-logger.info(f"Main: Loaded ANTHROPIC_BASE_URL={ANTHROPIC_BASE_URL}")
-if ANTHROPIC_API_KEY:
-    logger.info(f"Main: Loaded ANTHROPIC_API_KEY, length={len(ANTHROPIC_API_KEY)}")
+logger.info(f"Main: Loaded LLM_BASE_URL={LLM_BASE_URL}")
+if LLM_API_KEY:
+    logger.info(f"Main: Loaded LLM_API_KEY, length={len(LLM_API_KEY)}")
 else:
-    logger.warning("Main: ANTHROPIC_API_KEY is empty")
+    logger.warning("Main: LLM_API_KEY is empty")
 
 
 # ── 初始化各层 ───────────────────────────────────────────────
@@ -384,9 +384,18 @@ async def main():
             except asyncio.TimeoutError:
                 pass
 
+    async def _run_orchestrator():
+        try:
+            await orchestrator.start()
+        finally:
+            logger.info("Orchestrator finished, triggering shutdown of API server...")
+            shutdown_event.set()
+            if uvicorn_server:
+                uvicorn_server.should_exit = True
+
     try:
         await asyncio.gather(
-            orchestrator.start(),
+            _run_orchestrator(),
             _run_api(),
             _print_progress_loop(),
             return_exceptions=True,
