@@ -820,8 +820,8 @@ def tools_update(force):
     
     # Locus 需要的核心外部依赖（仅做框架示例，具体版本和下载链接可以维护在一个 JSON 中）
     tools_map = {
-        "nuclei": f"https://github.com/projectdiscovery/nuclei/releases/download/v3.2.0/nuclei_3.2.0_{sys_os}_{arch}.zip",
-        "httpx":  f"https://github.com/projectdiscovery/httpx/releases/download/v1.6.0/httpx_1.6.0_{sys_os}_{arch}.zip",
+        "nuclei": f"https://github.com/projectdiscovery/nuclei/releases/download/v3.2.0/nuclei_3.2.0_{os_name}_{arch}.zip",
+        "httpx":  f"https://github.com/projectdiscovery/httpx/releases/download/v1.6.0/httpx_1.6.0_{os_name}_{arch}.zip",
     }
     
     for tname, url in tools_map.items():
