@@ -34,8 +34,8 @@
 
 克隆本仓库到本地：
 ```bash
-git clone https://github.com/GLA32005/GLA3-ATK.git
-cd GLA3-ATK
+git clone https://github.com/GLA32005/locus.git
+cd locus
 ```
 
 ### 2. 启动底层存储服务
