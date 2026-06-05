@@ -38,14 +38,22 @@ git clone https://github.com/GLA32005/locus.git
 cd locus
 ```
 
-### 2. 启动底层存储服务
+### 2. 配置底层存储服务
 
-Locus 强依赖 Redis、Neo4j 和 ClickHouse。你可以直接通过 Docker Compose 一键启动：
+Locus 强依赖 Redis、Neo4j 和 ClickHouse。**你不需要强制安装 Docker**，只要能连接到这三个服务即可：
 
+**方案 A：使用现有服务 (非 Docker 环境)**
+如果你已经有这些服务（本地原生安装或云端服务），只需复制环境模板并修改为你自己的连接地址：
+```bash
+cp .env.example .env
+# 编辑 .env 文件中的 REDIS_URL, NEO4J_URL, CLICKHOUSE_HOST 等配置
+```
+
+**方案 B：使用 Docker 一键启动 (推荐新手)**
+如果你安装了 Docker，可以直接通过项目提供的 Compose 文件一键拉起所有依赖环境：
 ```bash
 docker-compose up -d
 ```
-*(如果没有提供 docker-compose.yml，你可以在 `.env` 中修改对应的服务连接地址)*
 
 ### 3. 安装项目依赖
 
