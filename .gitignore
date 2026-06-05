@@ -36,3 +36,7 @@ redis_data/
 # Locus runtime
 reports/
 .locus/
+
+# Temporary and Scratch
+scratch/
+* copy*
