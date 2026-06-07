@@ -1,0 +1,1217 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LOCUS — Live Dashboard</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Inter:wght@300;400;600;700&display=swap');
+
+        :root {
+            --bg: #ffffff;
+            --bg2: #f9fafb;
+            --bg3: #ffffff;
+            --border: #e4e4e7;
+            --border2: #d4d4d8;
+
+            --cyan: #323282;
+            --cyan-dim: #eff0ff;
+
+            --blue: #323282;
+            --blue-bg: #eff0ff;
+
+            --purple: #5c5c8a;
+            --purple-bg: #f4f4f5;
+
+            --yellow: #8d5b2d;
+            --yellow-bg: #fef7e7;
+
+            --red: #9a2828;
+            --red-bg: #fdf2f2;
+
+            --green: #185b46;
+            --green-bg: #eef9f2;
+
+            --text: #18181b;
+            --text-dim: #52525b;
+            --text-mute: #a1a1aa;
+
+            --mono: 'Share Tech Mono', monospace;
+            --sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--sans);
+            font-size: 14px;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* ── HEADER ── */
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 24px;
+            border-bottom: 0.5px solid var(--border);
+            background: var(--bg2);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo {
+            font-family: var(--mono);
+            font-size: 20px;
+            letter-spacing: 6px;
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        .header-meta {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--text-dim);
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--green);
+            animation: pulse 2s infinite;
+            display: inline-block;
+            margin-right: 6px;
+        }
+
+        .status-dot.idle {
+            background: var(--yellow);
+        }
+
+        .status-dot.offline {
+            background: var(--red);
+            animation: none;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.4;
+            }
+        }
+
+        .phase-badge {
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            border: 0.5px solid var(--border);
+        }
+
+        .phase-RECON {
+            background: var(--blue-bg);
+            color: var(--blue);
+            border-color: rgba(50, 50, 130, 0.2);
+        }
+
+        .phase-EXPLOIT {
+            background: var(--red-bg);
+            color: var(--red);
+            border-color: rgba(154, 40, 40, 0.2);
+        }
+
+        .phase-PRIVESC {
+            background: var(--yellow-bg);
+            color: var(--yellow);
+            border-color: rgba(141, 91, 45, 0.2);
+        }
+
+        .phase-LATERAL {
+            background: var(--purple-bg);
+            color: var(--purple);
+            border-color: rgba(92, 92, 138, 0.2);
+        }
+
+        .phase-REPORT {
+            background: var(--green-bg);
+            color: var(--green);
+            border-color: rgba(24, 91, 70, 0.2);
+        }
+
+        .phase-IDLE {
+            background: var(--bg2);
+            color: var(--text-dim);
+            border-color: var(--border);
+        }
+
+        /* ── LAYOUT ── */
+        .main {
+            display: grid;
+            grid-template-columns: 260px 1fr;
+            grid-template-rows: auto 1fr;
+            gap: 0;
+            height: calc(100vh - 53px);
+        }
+
+        /* ── SIDEBAR ── */
+        .sidebar {
+            grid-row: 1 / 3;
+            border-right: 0.5px solid var(--border);
+            background: var(--bg2);
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+
+        .sidebar-section {
+            padding: 16px;
+            border-bottom: 0.5px solid var(--border);
+        }
+
+        .section-label {
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 3px;
+            color: var(--text-mute);
+            text-transform: uppercase;
+            margin-bottom: 12px;
+        }
+
+        /* ── KPI CARDS ── */
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .kpi {
+            background: var(--bg3);
+            border: 0.5px solid var(--border);
+            border-radius: 4px;
+            padding: 10px 12px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+        }
+
+        .kpi-val {
+            font-family: var(--mono);
+            font-size: 22px;
+            font-weight: 600;
+            line-height: 1;
+            color: var(--text);
+        }
+
+        .kpi.cyan .kpi-val {
+            color: var(--cyan);
+        }
+
+        .kpi.blue .kpi-val {
+            color: var(--blue);
+        }
+
+        .kpi.red .kpi-val {
+            color: var(--red);
+        }
+
+        .kpi.green .kpi-val {
+            color: var(--green);
+        }
+
+        .kpi.yellow .kpi-val {
+            color: var(--yellow);
+        }
+
+        .kpi.purple .kpi-val {
+            color: var(--purple);
+        }
+
+        .kpi-label {
+            font-size: 10px;
+            color: var(--text-dim);
+            margin-top: 4px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        /* ── STALL METER ── */
+        .stall-meter {
+            margin-top: 4px;
+        }
+
+        .stall-track {
+            height: 4px;
+            border-radius: 2px;
+            background: var(--bg2);
+            border: 0.5px solid var(--border);
+            overflow: hidden;
+            position: relative;
+        }
+
+        .stall-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.6s ease, background 0.3s;
+        }
+
+        .stall-labels {
+            display: flex;
+            justify-content: space-between;
+            font-family: var(--mono);
+            font-size: 10px;
+            color: var(--text-dim);
+            margin-top: 4px;
+        }
+
+        /* ── TARGET INFO ── */
+        .target-info {
+            font-family: var(--mono);
+            font-size: 12px;
+        }
+
+        .target-ip {
+            color: var(--text);
+            font-size: 14px;
+            word-break: break-all;
+            font-weight: 600;
+        }
+
+        .target-conf {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .conf-bar {
+            flex: 1;
+            height: 4px;
+            border-radius: 2px;
+            background: var(--bg2);
+            border: 0.5px solid var(--border);
+            overflow: hidden;
+        }
+
+        .conf-fill {
+            height: 100%;
+            border-radius: 2px;
+            background: var(--text-dim);
+            transition: width 0.6s ease;
+        }
+
+        /* ── LLM STATS ── */
+        .llm-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 5px 0;
+            border-bottom: 0.5px dashed var(--border);
+            font-size: 11px;
+        }
+
+        .llm-row:last-child {
+            border-bottom: none;
+        }
+
+        .llm-label {
+            color: var(--text-dim);
+            font-family: var(--mono);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .llm-val {
+            color: var(--text);
+            font-family: var(--mono);
+        }
+
+        .llm-val.upgrade {
+            color: var(--yellow);
+        }
+
+        /* ── MAIN CONTENT ── */
+        .content-top {
+            padding: 16px 20px;
+            border-bottom: 0.5px solid var(--border);
+            background: var(--bg);
+        }
+
+        .content-body {
+            padding: 16px 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        /* ── PHASE TIMELINE ── */
+        .phase-timeline {
+            display: flex;
+            align-items: center;
+            gap: 0;
+            background: var(--bg2);
+            border: 0.5px solid var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .phase-step {
+            flex: 1;
+            padding: 10px 8px;
+            text-align: center;
+            font-family: var(--sans);
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: var(--text-mute);
+            border-right: 0.5px solid var(--border);
+            position: relative;
+            transition: all 0.3s;
+            cursor: pointer;
+            background: var(--bg2);
+        }
+
+        .phase-step:hover {
+            background: var(--bg);
+            color: var(--text-dim);
+        }
+
+        .phase-step:last-child {
+            border-right: none;
+        }
+
+        .phase-step.active {
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .phase-step.done {
+            color: var(--text-dim);
+        }
+
+        .phase-step.running::before {
+            content: '';
+            position: absolute;
+            left: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--green);
+            animation: pulse 2s infinite;
+            box-shadow: 0 0 4px var(--green);
+        }
+
+        .phase-step.active::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: var(--text);
+        }
+
+        /* ── VECTORS TABLE ── */
+        .panel {
+            background: var(--bg);
+            border: 0.5px solid var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 16px;
+            border-bottom: 0.5px solid var(--border);
+            background: var(--bg2);
+        }
+
+        .panel-title {
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--text-dim);
+        }
+
+        .panel-badge {
+            font-family: var(--mono);
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 2px;
+            background: var(--bg);
+            border: 0.5px solid var(--border);
+            color: var(--text-dim);
+        }
+
+        /* ── VECTOR BARS ── */
+        .vector-stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 0.5px;
+            background: var(--border);
+        }
+
+        .vector-stat {
+            background: var(--bg);
+            padding: 14px 16px;
+            text-align: center;
+        }
+
+        .vector-stat-val {
+            font-family: var(--mono);
+            font-size: 24px;
+            color: var(--text);
+        }
+
+        .vector-stat-val.success {
+            color: var(--green);
+        }
+
+        .vector-stat-val.fail {
+            color: var(--red);
+        }
+
+        .vector-stat-val.pending {
+            color: var(--yellow);
+        }
+
+        .vector-stat-label {
+            font-size: 10px;
+            color: var(--text-dim);
+            margin-top: 3px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        /* ── RECON TASKS ── */
+        .task-list {
+            padding: 0;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .task-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 16px;
+            border-bottom: 0.5px solid var(--border);
+            font-family: var(--mono);
+            font-size: 11px;
+            transition: background 0.15s;
+        }
+
+        .task-row:hover {
+            background: var(--bg2);
+        }
+
+        .task-row:last-child {
+            border-bottom: none;
+        }
+
+        .task-tool {
+            width: 100px;
+            color: var(--text-dim);
+            flex-shrink: 0;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .task-target {
+            flex: 1;
+            color: var(--text);
+        }
+
+        .task-status {
+            font-size: 9px;
+            padding: 2px 6px;
+            border-radius: 2px;
+            letter-spacing: 1px;
+            border: 0.5px solid transparent;
+        }
+
+        .task-status.running {
+            background: var(--blue-bg);
+            color: var(--blue);
+            border-color: rgba(50, 50, 130, 0.2);
+        }
+
+        .task-status.done {
+            background: var(--green-bg);
+            color: var(--green);
+            border-color: rgba(24, 91, 70, 0.2);
+        }
+
+        .task-status.pending {
+            background: var(--yellow-bg);
+            color: var(--yellow);
+            border-color: rgba(141, 91, 45, 0.2);
+        }
+
+        /* ── PAYLOAD LIST ── */
+        .payload-row {
+            display: grid;
+            grid-template-columns: 60px 1fr 90px 80px;
+            gap: 10px;
+            align-items: center;
+            padding: 8px 16px;
+            border-bottom: 0.5px solid var(--border);
+            font-family: var(--mono);
+            font-size: 11px;
+            transition: background 0.15s;
+        }
+
+        .payload-row:hover {
+            background: var(--bg2);
+        }
+
+        .payload-row:last-child {
+            border-bottom: none;
+        }
+
+        .payload-id {
+            color: var(--text-mute);
+        }
+
+        .payload-tech {
+            color: var(--text);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .payload-verdict {
+            text-align: center;
+            padding: 2px 6px;
+            border-radius: 2px;
+            font-size: 9px;
+            letter-spacing: 1px;
+            border: 0.5px solid transparent;
+        }
+
+        .verdict-APPROVED {
+            background: var(--green-bg);
+            color: var(--green);
+            border-color: rgba(24, 91, 70, 0.2);
+        }
+
+        .verdict-BLOCKED {
+            background: var(--red-bg);
+            color: var(--red);
+            border-color: rgba(154, 40, 40, 0.2);
+        }
+
+        .verdict-PENDING {
+            background: var(--yellow-bg);
+            color: var(--yellow);
+            border-color: rgba(141, 91, 45, 0.2);
+        }
+
+        .verdict-ABANDONED {
+            background: var(--bg2);
+            color: var(--text-dim);
+            border-color: var(--border);
+        }
+
+        .payload-result {
+            text-align: right;
+            color: var(--text-dim);
+        }
+
+        .payload-result.FAIL {
+            color: var(--red);
+        }
+
+        .payload-result.SUCCESS {
+            color: var(--green);
+        }
+
+        /* ── ACTIVITY LOG ── */
+        .log-list {
+            padding: 0;
+            max-height: 240px;
+            overflow-y: auto;
+            font-family: var(--mono);
+            font-size: 11px;
+        }
+
+        .log-entry {
+            display: flex;
+            gap: 10px;
+            align-items: flex-start;
+            padding: 6px 16px;
+            border-bottom: 0.5px solid var(--border);
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(-4px);
+            }
+
+            to {
+                opacity: 1;
+            }
+        }
+
+        .log-time {
+            color: var(--text-mute);
+            flex-shrink: 0;
+        }
+
+        .log-level {
+            width: 60px;
+            flex-shrink: 0;
+            text-transform: uppercase;
+            font-size: 9px;
+            letter-spacing: 1px;
+        }
+
+        .log-level.INFO {
+            color: var(--text-dim);
+        }
+
+        .log-level.WARNING {
+            color: var(--yellow);
+        }
+
+        .log-level.ERROR {
+            color: var(--red);
+        }
+
+        .log-msg {
+            color: var(--text);
+            line-height: 1.5;
+        }
+
+        .log-msg .highlight {
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        /* ── CONNECTION ERROR ── */
+        .conn-error {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 12px;
+            height: 100%;
+            color: var(--text-dim);
+            font-family: var(--mono);
+            font-size: 12px;
+        }
+
+        .conn-error-icon {
+            font-size: 40px;
+            opacity: 0.3;
+        }
+
+        /* ── CONFIG PANEL ── */
+        .config-form {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .config-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .config-row label {
+            font-family: var(--mono);
+            font-size: 10px;
+            color: var(--text-dim);
+            width: 60px;
+            flex-shrink: 0;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .config-row input {
+            flex: 1;
+            background: var(--bg);
+            border: 0.5px solid var(--border);
+            border-radius: 3px;
+            padding: 5px 8px;
+            color: var(--text);
+            font-family: var(--mono);
+            font-size: 11px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .config-row input:focus {
+            border-color: var(--text-dim);
+        }
+
+        .config-btn {
+            padding: 6px 14px;
+            border-radius: 3px;
+            background: var(--bg);
+            border: 0.5px solid var(--border);
+            color: var(--text);
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: all 0.2s;
+            width: 100%;
+            margin-top: 4px;
+        }
+
+        .config-btn:hover {
+            background: var(--bg2);
+            border-color: var(--text-dim);
+        }
+
+        /* scrollbar */
+        ::-webkit-scrollbar {
+            width: 4px;
+            height: 4px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border2);
+            border-radius: 2px;
+        }
+
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .empty-state {
+            padding: 24px;
+            text-align: center;
+            color: var(--text-mute);
+            font-family: var(--mono);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div class="logo">GLA3-LOCUS</div>
+        <div class="header-meta"><span><span class="status-dot" id="statusDot"></span><span
+                    id="statusText">连接中...</span></span><span id="lastUpdate"
+                style="color:var(--text-mute)">--</span><span id="phaseBadge" class="phase-badge phase-IDLE">IDLE</span>
+        </div>
+    </header>
+    <div class="main"><!-- SIDEBAR -->
+        <aside class="sidebar"><!-- KPI -->
+            <div class="sidebar-section">
+                <div class="section-label">关键指标</div>
+                <div class="kpi-grid">
+                    <div class="kpi cyan">
+                        <div class="kpi-val" id="kpiHosts">—</div>
+                        <div class="kpi-label">发现主机</div>
+                    </div>
+                    <div class="kpi red">
+                        <div class="kpi-val" id="kpiOwned">—</div>
+                        <div class="kpi-label">已控制</div>
+                    </div>
+                    <div class="kpi blue">
+                        <div class="kpi-val" id="kpiVectors">—</div>
+                        <div class="kpi-label">攻击向量</div>
+                    </div>
+                    <div class="kpi green">
+                        <div class="kpi-val" id="kpiSuccess">—</div>
+                        <div class="kpi-label">命中</div>
+                    </div>
+                </div>
+            </div><!-- STALL -->
+            <div class="sidebar-section">
+                <div class="section-label">空转计数</div>
+                <div class="stall-meter">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:6px;"><span
+                            style="font-family:var(--mono);font-size:13px;" id="stallVal">0</span><span
+                            style="font-family:var(--mono);font-size:11px;color:var(--text-dim);">/ <span
+                                id="stallMax">10</span></span></div>
+                    <div class="stall-track">
+                        <div class="stall-fill" id="stallFill" style="width:0%;background:var(--cyan);"></div>
+                    </div>
+                    <div class="stall-labels"><span>稳定</span><span>空转</span><span>危险</span></div>
+                </div>
+                <div style="margin-top:10px;font-family:var(--mono);font-size:11px;color:var(--text-dim);">累计空转：<span
+                        id="totalStall" style="color:var(--text);">—</span></div>
+            </div><!-- TARGET -->
+            <div class="sidebar-section">
+                <div class="section-label">当前目标</div>
+                <div class="target-info">
+                    <div class="target-ip" id="targetIp">—</div>
+                    <div class="target-conf" style="margin-top:8px;"><span
+                            style="color:var(--text-dim);font-size:11px;">置信度</span>
+                        <div class="conf-bar">
+                            <div class="conf-fill" id="confFill" style="width:0%"></div>
+                        </div><span style="color:var(--cyan);font-size:12px;" id="confVal">0%</span>
+                    </div>
+                </div>
+            </div><!-- LLM STATS -->
+            <div class="sidebar-section">
+                <div class="section-label">模型调用</div>
+                <div id="llmStats">
+                    <div class="llm-row"><span class="llm-label">本地调用</span><span class="llm-val" id="llmLocal">—</span>
+                    </div>
+                    <div class="llm-row"><span class="llm-label">Strong升级</span><span class="llm-val upgrade"
+                            id="llmUpgrade">—</span></div>
+                    <div class="llm-row"><span class="llm-label">预算剩余</span><span class="llm-val"
+                            id="llmBudget">—</span></div>
+                    <div class="llm-row"><span class="llm-label">Token消耗</span><span class="llm-val"
+                            id="llmTokens">—</span></div>
+                </div>
+            </div><!-- API CONFIG -->
+            <div class="sidebar-section" style="flex:1;">
+                <div class="section-label">API 连接</div>
+                <div class="config-form">
+                    <div class="config-row"><label>Host</label><input type="text" id="cfgHost"
+                            value="http://localhost:8086" /></div>
+                    <div class="config-row"><label>API Key</label><input type="password" id="cfgKey"
+                            value="changeme-to-a-strong-secret" /></div><button class="config-btn"
+                        onclick="reconnect()">重新连接</button>
+                </div>
+            </div>
+        </aside><!-- TOP: PHASE TIMELINE -->
+        <div class="content-top">
+            <div class="phase-timeline" id="phaseTimeline">
+                <div class="phase-step active" data-phase="RECON" onclick="selectTab('RECON')">Recon</div>
+                <div class="phase-step" data-phase="EXPLOIT" onclick="selectTab('EXPLOIT')">Exploit</div>
+                <div class="phase-step" data-phase="PRIVESC" onclick="selectTab('PRIVESC')">Privesc</div>
+                <div class="phase-step" data-phase="LATERAL" onclick="selectTab('LATERAL')">Lateral</div>
+                <div class="phase-step" data-phase="PERSIST" onclick="selectTab('PERSIST')">Persist</div>
+                <div class="phase-step" data-phase="REPORT" onclick="selectTab('REPORT')">Report</div>
+            </div>
+        </div><!-- BODY -->
+        <div class="content-body"><!-- VECTORS -->
+            <div class="panel">
+                <div class="panel-header"><span class="panel-title">攻击向量统计</span><span class="panel-badge"
+                        id="vecTotal">total: 0</span></div>
+                <div class="vector-stats">
+                    <div class="vector-stat">
+                        <div class="vector-stat-val success" id="vecSuccess">0</div>
+                        <div class="vector-stat-label">命中</div>
+                    </div>
+                    <div class="vector-stat">
+                        <div class="vector-stat-val fail" id="vecFail">0</div>
+                        <div class="vector-stat-label">失败</div>
+                    </div>
+                    <div class="vector-stat">
+                        <div class="vector-stat-val pending" id="vecPending">0</div>
+                        <div class="vector-stat-label">待审批</div>
+                    </div>
+                </div>
+            </div><!-- TASKS+PAYLOADS -->
+            <div class="two-col"><!-- RECON TASKS -->
+                <div class="panel">
+                    <div class="panel-header"><span class="panel-title">Recon 任务</span><span class="panel-badge"
+                            id="taskCount">0</span></div>
+                    <div class="task-list" id="taskList">
+                        <div class="empty-state">暂无任务数据</div>
+                    </div>
+                </div><!-- PAYLOADS -->
+                <div class="panel">
+                    <div class="panel-header"><span class="panel-title">Payload 队列</span><span class="panel-badge"
+                            id="payloadCount">0</span></div>
+                    <div class="task-list" id="payloadList">
+                        <div class="empty-state">暂无 Payload</div>
+                    </div>
+                </div>
+            </div><!-- ACTIVITY LOG -->
+            <div class="panel">
+                <div class="panel-header"><span class="panel-title">实时活动日志</span><span class="panel-badge"
+                        id="logCount">0</span></div>
+                <div class="log-list" id="logList">
+                    <div class="empty-state">等待数据...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script> // ── CONFIG ──────────────────────────────────────────
+        let API_HOST = 'http://localhost:8086';
+        let API_KEY = 'changeme-to-a-strong-secret';
+        let pollTimer = null;
+        let logEntries = [];
+        const MAX_LOG = 80;
+        const PHASES = ['RECON',
+            'EXPLOIT',
+            'PRIVESC',
+            'LATERAL',
+            'PERSIST',
+            'REPORT'
+        ];
+        
+        let currentTab = 'RECON';
+
+        function selectTab(phase) {
+            currentTab = phase;
+            document.querySelectorAll('.phase-step').forEach(el => {
+                if (el.dataset.phase === phase) {
+                    el.classList.add('active');
+                } else {
+                    el.classList.remove('active');
+                    el.classList.remove('done');
+                }
+            });
+
+            const reconPanel = document.getElementById('taskList').closest('.panel');
+            const payloadPanel = document.getElementById('payloadList').closest('.panel');
+            
+            if (phase === 'RECON') {
+                reconPanel.style.display = 'block';
+                payloadPanel.style.display = 'none';
+            } else if (phase === 'REPORT') {
+                reconPanel.style.display = 'none';
+                payloadPanel.style.display = 'none';
+            } else {
+                reconPanel.style.display = 'none';
+                payloadPanel.style.display = 'block';
+            }
+
+            renderLogs();
+        }
+
+        // ── INIT ─────────────────────────────────────────────
+        function reconnect() {
+            API_HOST = document.getElementById('cfgHost').value.replace(/\/$/, '');
+            API_KEY = document.getElementById('cfgKey').value;
+            if (pollTimer) clearInterval(pollTimer);
+            poll();
+            pollTimer = setInterval(poll, 4000);
+
+            addLog('INFO', `尝试连接 ${API_HOST
+                }
+
+        `);
+        }
+
+        // ── POLL ─────────────────────────────────────────────
+        async function poll() {
+            try {
+
+                const [progress,
+                    payloads,
+                    tasks] = await Promise.all([apiFetch('/progress'),
+                    apiFetch('/payloads/pending-approval').catch(() => ({
+                        items: []
+
+                    })),
+                    apiFetch('/footprints').catch(() => ({
+                        footprints: []
+                    })),
+                    ]);
+                updateDashboard(progress, payloads, tasks);
+                setStatus('online', '实时同步');
+            }
+
+            catch (e) {
+                setStatus('offline', '连接失败');
+            }
+        }
+
+        async function apiFetch(path) {
+            const r = await fetch(API_HOST + path, {
+                headers: {
+                    'X-API-Key': API_KEY
+                }
+            });
+            if (!r.ok) throw new Error(r.status);
+            return r.json();
+        }
+
+        // ── UPDATE ───────────────────────────────────────────
+        function updateDashboard(prog, payloads, footprintsData) {
+            const h = prog.hosts || {};
+            const p = prog.payloads || {};
+            const llm = prog.llm_stats || {};
+
+            // KPIs
+            setText('kpiHosts', h.discovered ?? '—');
+            setText('kpiOwned', h.owned ?? '—');
+            setText('kpiVectors', p.vectors_total ?? '—');
+            setText('kpiSuccess', p.vectors_success ?? '—');
+
+            // Stall
+            const stall = prog.stall_count ?? 0;
+            const maxStall = 10;
+            const stallPct = Math.min(stall / maxStall * 100, 100);
+            setText('stallVal', stall);
+            setText('stallMax', maxStall);
+            const fillEl = document.getElementById('stallFill');
+            fillEl.style.width = stallPct + '%';
+            fillEl.style.background = stallPct > 70 ? 'var(--red)' : stallPct > 40 ? 'var(--yellow)' : 'var(--cyan)';
+
+            // Target & confidence
+            setText('targetIp', prog.active_target || '—');
+            const conf = Math.round((prog.confidence || 0) * 100);
+            setText('confVal', conf + '%');
+            document.getElementById('confFill').style.width = conf + '%';
+
+            // Phase badge
+            const phase = (prog.current_goal || 'IDLE').toUpperCase();
+            const badge = document.getElementById('phaseBadge');
+            badge.className = 'phase-badge phase-' + (PHASES.includes(phase) ? phase : 'IDLE');
+            badge.textContent = phase;
+
+            document.querySelectorAll('.phase-step').forEach(el => {
+                if (el.dataset.phase === phase) {
+                    el.classList.add('running');
+                } else {
+                    el.classList.remove('running');
+                }
+            });
+
+            // Vectors
+            const total = p.vectors_total ?? 0;
+            const success = p.vectors_success ?? 0;
+            const fail = total - success - (p.pending ?? 0);
+            setText('vecTotal', 'total: ' + total);
+            setText('vecSuccess', success);
+            setText('vecFail', Math.max(0, fail));
+            setText('vecPending', p.pending ?? 0);
+
+            // LLM stats
+            setText('llmLocal', llm.local_calls ?? '—');
+            setText('llmUpgrade', llm.strong_upgrades ?? '—');
+            setText('llmBudget', llm.strong_budget ?? '—');
+            setText('llmTokens', llm.total_tokens ?? '—');
+
+            // Payloads
+            renderPayloads(payloads.items || []);
+
+            // Tasks from footprints (recent activity)
+            renderTasks(footprintsData.footprints || []);
+
+            // Auto-generate log entry
+            const now = new Date().toLocaleTimeString('zh-CN', {
+                hour12: false
+            });
+
+            addLog('INFO', `[${phase}] 目标 <span class="highlight">${prog.active_target || '—'}</span> | vectors=${total} success=${success} stall=${stall}`);
+            setText('lastUpdate', now);
+        }
+
+        function renderPayloads(items) {
+            const list = document.getElementById('payloadList');
+            setText('payloadCount', items.length);
+
+            if (!items.length) {
+                list.innerHTML = '<div class="empty-state">暂无待审批 Payload</div>';
+                return;
+            }
+
+            list.innerHTML = items.slice(0, 20).map(p => ` <div class="payload-row" > <span class="payload-id" >${(p.id || '').slice(0, 6)
+                }
+
+        …</span> <span class="payload-tech" >${p.technique || '—'
+                }
+
+        </span> <span class="payload-verdict verdict-PENDING" >待审批</span> <span class="payload-result" >${p.target || ''
+                }
+
+        </span> </div> `).join('');
+        }
+
+        function renderTasks(footprints) {
+            const list = document.getElementById('taskList');
+            const recent = footprints.slice(-15).reverse();
+            setText('taskCount', footprints.length);
+
+            if (!recent.length) {
+                list.innerHTML = '<div class="empty-state">暂无 Footprint 记录</div>';
+                return;
+            }
+
+            list.innerHTML = recent.map(f => ` <div class="task-row" > <span class="task-tool" >${(f.tool || f.type || '—').slice(0, 12)
+                }
+
+        </span> <span class="task-target" >${f.target || '—'
+                }
+
+        </span> <span class="task-status ${f.cleaned ? 'done' : 'running'}" >${f.cleaned ? 'DONE' : 'ACTIVE'
+                }
+
+        </span> </div> `).join('');
+        }
+
+        // ── LOG ──────────────────────────────────────────────
+        function addLog(level, msg) {
+            const now = new Date().toLocaleTimeString('zh-CN', {
+                hour12: false
+            });
+
+            logEntries.unshift({
+                time: now, level, msg
+            });
+            if (logEntries.length > MAX_LOG) logEntries.pop();
+            const list = document.getElementById('logList');
+            setText('logCount', logEntries.length);
+
+            list.innerHTML = logEntries.map(e => ` <div class="log-entry" > <span class="log-time" >${e.time
+                }
+
+    </span> <span class="log-level ${e.level}" >${e.level
+                }
+
+    </span> <span class="log-msg" >${e.msg
+                }
+
+    </span> </div> `).join('');
+        }
+
+        // ── HELPERS ──────────────────────────────────────────
+        function setText(id, val) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = val;
+        }
+
+        function setStatus(state, text) {
+            const dot = document.getElementById('statusDot');
+            const span = document.getElementById('statusText');
+            dot.className = 'status-dot ' + (state === 'online' ? '' : state);
+            span.textContent = text;
+        }
+
+        // ── START ─────────────────────────────────────────────
+        reconnect();
+    </script>
+</body>
+
+</html>

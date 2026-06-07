@@ -249,6 +249,8 @@ class Orchestrator:
         """强制触发 CLEANUP_STATE 并停止 Orchestrator"""
         if self._in_cleanup:
             return
+        # 立即标记为清理中，迅速打断后续可能的 _trigger_think (解决事件队列阻塞导致 120s 强制退出的 Bug)
+        self._in_cleanup = True
         await self.event_bus.publish(Event(
             type=EventType.CLEANUP_STATE,
             priority=EventPriority.CRITICAL,
@@ -256,7 +258,8 @@ class Orchestrator:
             payload={"reason": reason}
         ))
         # 问题 #11 修复：硬超时兜底，防止 cleanup 卡死导致进程永不退出
-        asyncio.get_event_loop().call_later(120, self._force_stop, reason)
+        # 放宽至 900s (15min)，留给 LLM 生成报告和人工审批 Cleanup 任务的时间
+        asyncio.get_event_loop().call_later(900, self._force_stop, reason)
 
     async def _trigger_think(self, force: bool = False):
         """
@@ -335,7 +338,7 @@ class Orchestrator:
             await self._handle_rag_query(output["rag_query"])
             # RAG 结果上黑板后，触发下一轮 Think
             await asyncio.sleep(0.5)
-            await self._trigger_think(force=True)
+            asyncio.create_task(self._trigger_think(force=True))
             return
 
         # 异步任务挂起（非阻塞）
@@ -507,11 +510,15 @@ class Orchestrator:
                         "stall_count": 0,
                         "hypothesis": f"RECON 阶段连续 {RECON_ROUND_LIMIT} 轮无新发现，强制进入 EXPLOIT",
                     })
+                    self._force_exploit_override = True
+                    self._force_exploit_override_rounds = 2
+                    self._force_strong_next_think = True
+                    
                     self._system_hint = (
-                        "重要：侦察阶段已连续多轮无进展，请基于已有信息生成利用方案。"
-                        "不要再请求侦察任务。"
+                        "重要：侦察阶段已连续多轮无进展，强制进入 EXPLOIT 阶段尝试突破。绝对禁止切换回 RECON 阶段！"
+                        "请尽最大努力利用已知服务，如果确认无开放服务或无法利用，请直接请求放弃目标或切换目标 (ABANDON_STRATEGY)。"
                     )
-                    await self._trigger_think(force=True)
+                    asyncio.create_task(self._trigger_think(force=True))
                     return
             else:
                 # 非 RECON 重置计数
@@ -555,7 +562,7 @@ class Orchestrator:
                 }
             )
             await self.state_api.apply_mutation(mutation)
-            await self._trigger_think(force=True)
+            asyncio.create_task(self._trigger_think(force=True))
             return
 
         if retry_count >= max_retry:
@@ -573,7 +580,7 @@ class Orchestrator:
             )
             await self.state_api.apply_mutation(mutation)
             # 触发 Planner 感知，换 VectorType
-            await self._trigger_think(force=True)
+            asyncio.create_task(self._trigger_think(force=True))
             return
 
         if p.get("reject_reason") == RejectReason.REQUIRES_APPROVAL:
@@ -659,7 +666,7 @@ class Orchestrator:
             await self._inject_bypass_task(target)
 
         # 新资产进来，触发 Planner 重算优先级队列
-        await self._trigger_think(force=True)
+        asyncio.create_task(self._trigger_think(force=True))
 
     async def _handle_asset_discovered(self, event: Event):
         """发现新资产，可能触发 opportunity_flag"""
@@ -692,7 +699,7 @@ class Orchestrator:
             payload=focus
         )
         await self.state_api.apply_mutation(mutation)
-        await self._trigger_think(force=True)
+        asyncio.create_task(self._trigger_think(force=True))
 
     async def _handle_exploit_success(self, event: Event):
         """利用成功：更新 assets 中的 access_level"""
@@ -709,7 +716,7 @@ class Orchestrator:
         # 重置 stall_count
         await self.state_api.update_focus_atomic({"stall_count": 0})
 
-        await self._trigger_think(force=True)
+        asyncio.create_task(self._trigger_think(force=True))
 
     async def _handle_stall_detected(self, event: Event):
         """陷入僵局：通知 Planner，可能需要人工介入"""
@@ -725,17 +732,22 @@ class Orchestrator:
                 "focus":  focus,
             })
         else:
-            await self._trigger_think(force=True)
+            asyncio.create_task(self._trigger_think(force=True))
 
     async def _handle_cleanup_state(self, event: Event):
         """进入清理阶段"""
-        if self._in_cleanup:
+        if getattr(self, "_cleanup_handled", False):
             return  # 防止重复触发
+        self._cleanup_handled = True
         self._in_cleanup = True
         logger.info("进入 CLEANUP_STATE，暂停所有 Exploit 调度")
 
-        # 先生成报告（不依赖 cleanup agent 成功返回）
-        # 即使 cleanup 的 LLM 调用超时，报告也不会丢失
+        # 将长耗时的报告生成和清理流程放入后台任务，防止阻塞事件循环
+        asyncio.create_task(self._run_cleanup_sequence())
+
+    async def _run_cleanup_sequence(self):
+        """执行实际的清理序列并等待完成"""
+        # 1. 先生成报告（不依赖 cleanup agent 成功返回）
         if self.report_generator:
             try:
                 mission = await self.state_api.get_mission()
@@ -748,9 +760,35 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Report generation failed: {e}")
 
+        # 2. 执行 cleanup agent 生成清理任务
+        logger.info("开始生成清理任务...")
         await self._invoke_cleanup({}, {})
-        # 清理完成后停止 Orchestrator
-        logger.info("CLEANUP_STATE 完成，停止 Orchestrator")
+
+        # 3. 等待所有清理任务执行完毕
+        logger.info("等待清理任务执行完毕...")
+        wait_start = time.time()
+        while self._is_running:
+            try:
+                tasks = await self.state_api.get_pending_cleanup_tasks()
+                # 检查是否还有未决的清理任务
+                active_tasks = [
+                    t for t in tasks 
+                    if t.get("status") in ("PENDING", "PENDING_HUMAN", "APPROVED", "EXECUTING")
+                ]
+                
+                if not active_tasks and self._active_executor_tasks == 0:
+                    logger.info("所有清理任务执行完毕，准备退出。")
+                    break
+                    
+                # 兜底超时: 10分钟
+                if time.time() - wait_start > 600:
+                    logger.error("等待清理任务完成超时 (600s)，强制退出。")
+                    break
+            except Exception as e:
+                logger.error(f"检查清理任务状态时出错: {e}")
+                
+            await asyncio.sleep(2.0)
+
         self.stop()
 
     async def _handle_human_approval(self, event: Event):
@@ -920,14 +958,20 @@ class Orchestrator:
         pruned = await self.pruner.generate_view(self.state_api)
         focus = pruned.get("focus", {})
         active_target = focus.get("active_target")
-        if active_target and await self.state_api.is_unreachable(active_target):
-            logger.warning(f"Exploit: 目标 {active_target} 已被标记为不可达，拒绝生成利用 payload")
-            # 累积 stall，避免死锁
-            current_focus = await self.state_api.get_focus()
-            new_stall = int(current_focus.get("stall_count", 0)) + 1
-            self._total_stall_count += 1
-            await self.state_api.update_focus_atomic({"stall_count": new_stall})
-            return
+        if active_target:
+            is_unreachable = await self.state_api.is_unreachable(active_target)
+            host_info = await self.state_api.get_host_full(active_target)
+            services = host_info.get("services", []) if host_info else []
+            
+            if is_unreachable or not services:
+                reason = "已被标记为不可达" if is_unreachable else "无任何已知服务"
+                logger.warning(f"Exploit: 目标 {active_target} {reason}，拒绝生成利用 payload")
+                # 累积 stall，避免死锁
+                current_focus = await self.state_api.get_focus()
+                new_stall = int(current_focus.get("stall_count", 0)) + 1
+                self._total_stall_count += 1
+                await self.state_api.update_focus_atomic({"stall_count": new_stall})
+                return
 
         node_input = NodeInput(
             state_view=pruned,
@@ -1242,7 +1286,7 @@ class Orchestrator:
 
         if knowledge_queries:
             await self._handle_knowledge_queries(knowledge_queries)
-            await self._trigger_think(force=True)
+            asyncio.create_task(self._trigger_think(force=True))
             
         # 如果 Agent 这一轮没有产生任何实际状态改变（比如任务全被过滤了）
         # 且当前没有任何异步 Executor 任务在运行，才标记为真正的 STALL
@@ -1377,7 +1421,7 @@ class Orchestrator:
                     "hypothesis": f"RECON 阶段空转 {stall_count} 次后强制进入 EXPLOIT，尝试利用"
                 })
                 
-                await self._trigger_think(force=True)
+                asyncio.create_task(self._trigger_think(force=True))
                 return
 
         # 条件4: stall 耗尽 → 清理退出
