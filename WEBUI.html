@@ -652,38 +652,62 @@
             color: var(--green);
         }
 
-        /* ── ACTIVITY LOG ── */
+        /* ── LLM THOUGHTS LOG ── */
         .log-list {
-            padding: 0;
-            max-height: 240px;
+            padding: 8px 16px;
+            max-height: 250px;
             overflow-y: auto;
             font-family: var(--mono);
             font-size: 11px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
         }
 
         .log-entry {
             display: flex;
-            gap: 10px;
             align-items: flex-start;
-            padding: 6px 16px;
-            border-bottom: 0.5px solid var(--border);
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            line-height: 1.4;
+            color: var(--text);
+            background: var(--bg2);
+            border-left: 2px solid var(--border);
             animation: fadeIn 0.3s ease;
         }
 
         @keyframes fadeIn {
-            from {
-                opacity: 0;
-                transform: translateY(-4px);
-            }
-
-            to {
-                opacity: 1;
-            }
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; }
         }
 
         .log-time {
             color: var(--text-mute);
+            font-size: 9px;
             flex-shrink: 0;
+            padding-top: 1px;
+        }
+
+        .log-agent {
+            font-size: 9px;
+            padding: 2px 6px;
+            border-radius: 2px;
+            letter-spacing: 0.5px;
+            font-weight: bold;
+            flex-shrink: 0;
+        }
+
+        .agent-PlannerAgent { background: rgba(160, 150, 200, 0.15); color: #a596c8; border: 0.5px solid rgba(160, 150, 200, 0.3); }
+        .agent-ReconAgent { background: rgba(150, 200, 180, 0.15); color: #96c8b4; border: 0.5px solid rgba(150, 200, 180, 0.3); }
+        .agent-ExploitAgent { background: rgba(200, 150, 160, 0.15); color: #c896a0; border: 0.5px solid rgba(200, 150, 160, 0.3); }
+        .agent-CriticAgent { background: rgba(200, 180, 150, 0.15); color: #c8b496; border: 0.5px solid rgba(200, 180, 150, 0.3); }
+
+        .log-text {
+            flex: 1;
+            word-break: break-all;
+            white-space: pre-wrap;
+        }
         }
 
         .log-level {
@@ -830,7 +854,7 @@
 
 <body>
     <header>
-        <div class="logo">GLA3-LOCUS</div>
+        <div class="logo">LOCUS</div>
         <div class="header-meta"><span><span class="status-dot" id="statusDot"></span><span
                     id="statusText">连接中...</span></span><span id="lastUpdate"
                 style="color:var(--text-mute)">--</span><span id="phaseBadge" class="phase-badge phase-IDLE">IDLE</span>
@@ -895,7 +919,11 @@
                             id="llmUpgrade">—</span></div>
                     <div class="llm-row"><span class="llm-label">预算剩余</span><span class="llm-val"
                             id="llmBudget">—</span></div>
-                    <div class="llm-row"><span class="llm-label">Token消耗</span><span class="llm-val"
+                    <div class="llm-row"><span class="llm-label">基础 Token</span><span class="llm-val"
+                            id="llmTokensBase">—</span></div>
+                    <div class="llm-row"><span class="llm-label">Strong Token</span><span class="llm-val"
+                            id="llmTokensStrong">—</span></div>
+                    <div class="llm-row"><span class="llm-label">总 Token</span><span class="llm-val"
                             id="llmTokens">—</span></div>
                 </div>
             </div><!-- API CONFIG -->
@@ -954,9 +982,9 @@
                         <div class="empty-state">暂无 Payload</div>
                     </div>
                 </div>
-            </div><!-- ACTIVITY LOG -->
+            </div><!-- LLM THOUGHTS LOG -->
             <div class="panel">
-                <div class="panel-header"><span class="panel-title">实时活动日志</span><span class="panel-badge"
+                <div class="panel-header"><span class="panel-title">大模型思维链 (Agent Thoughts)</span><span class="panel-badge"
                         id="logCount">0</span></div>
                 <div class="log-list" id="logList">
                     <div class="empty-state">等待数据...</div>
@@ -977,7 +1005,7 @@
             'PERSIST',
             'REPORT'
         ];
-        
+
         let currentTab = 'RECON';
 
         function selectTab(phase) {
@@ -993,7 +1021,7 @@
 
             const reconPanel = document.getElementById('taskList').closest('.panel');
             const payloadPanel = document.getElementById('payloadList').closest('.panel');
-            
+
             if (phase === 'RECON') {
                 reconPanel.style.display = 'block';
                 payloadPanel.style.display = 'none';
@@ -1016,28 +1044,20 @@
             poll();
             pollTimer = setInterval(poll, 4000);
 
-            addLog('INFO', `尝试连接 ${API_HOST
-                }
-
-        `);
+            pollTimer = setInterval(poll, 4000);
         }
 
         // ── POLL ─────────────────────────────────────────────
         async function poll() {
             try {
 
-                const [progress,
-                    payloads,
-                    tasks] = await Promise.all([apiFetch('/progress'),
-                    apiFetch('/payloads/pending-approval').catch(() => ({
-                        items: []
-
-                    })),
-                    apiFetch('/footprints').catch(() => ({
-                        footprints: []
-                    })),
-                    ]);
-                updateDashboard(progress, payloads, tasks);
+                const [progress, payloads, tasks, logsRes] = await Promise.all([
+                    apiFetch('/progress'),
+                    apiFetch('/payloads/pending-approval').catch(() => ({ items: [] })),
+                    apiFetch('/footprints').catch(() => ({ footprints: [] })),
+                    apiFetch('/llm_logs').catch(() => ({ logs: [] }))
+                ]);
+                updateDashboard(progress, payloads, tasks, logsRes);
                 setStatus('online', '实时同步');
             }
 
@@ -1057,7 +1077,7 @@
         }
 
         // ── UPDATE ───────────────────────────────────────────
-        function updateDashboard(prog, payloads, footprintsData) {
+        function updateDashboard(prog, payloads, footprintsData, logsRes) {
             const h = prog.hosts || {};
             const p = prog.payloads || {};
             const llm = prog.llm_stats || {};
@@ -1111,6 +1131,8 @@
             setText('llmLocal', llm.local_calls ?? '—');
             setText('llmUpgrade', llm.strong_upgrades ?? '—');
             setText('llmBudget', llm.strong_budget ?? '—');
+            setText('llmTokensBase', llm.total_tokens_base ?? '—');
+            setText('llmTokensStrong', llm.total_tokens_strong ?? '—');
             setText('llmTokens', llm.total_tokens ?? '—');
 
             // Payloads
@@ -1119,13 +1141,10 @@
             // Tasks from footprints (recent activity)
             renderTasks(footprintsData.footprints || []);
 
-            // Auto-generate log entry
-            const now = new Date().toLocaleTimeString('zh-CN', {
-                hour12: false
-            });
-
-            addLog('INFO', `[${phase}] 目标 <span class="highlight">${prog.active_target || '—'}</span> | vectors=${total} success=${success} stall=${stall}`);
+            // Auto-generate log entry removed, rendering LLM logs instead
+            const now = new Date().toLocaleTimeString('zh-CN', { hour12: false });
             setText('lastUpdate', now);
+            renderLLMLogs(logsRes.logs || []);
         }
 
         function renderPayloads(items) {
@@ -1171,29 +1190,42 @@
         </span> </div> `).join('');
         }
 
-        // ── LOG ──────────────────────────────────────────────
-        function addLog(level, msg) {
-            const now = new Date().toLocaleTimeString('zh-CN', {
-                hour12: false
-            });
-
-            logEntries.unshift({
-                time: now, level, msg
-            });
-            if (logEntries.length > MAX_LOG) logEntries.pop();
+        // ── LLM LOGS ──────────────────────────────────────────────
+        function renderLLMLogs(logs) {
             const list = document.getElementById('logList');
-            setText('logCount', logEntries.length);
+            setText('logCount', logs.length);
 
-            list.innerHTML = logEntries.map(e => ` <div class="log-entry" > <span class="log-time" >${e.time
-                }
+            if (!logs.length) {
+                list.innerHTML = '<div class="empty-state">暂无思维链日志...</div>';
+                return;
+            }
 
-    </span> <span class="log-level ${e.level}" >${e.level
-                }
+            // The latest logs from Redis are at the end, so we reverse it to show newest at bottom or top?
+            // Actually, for a terminal style, if we append, newest is at bottom.
+            // Let's render in chronological order (newest at bottom) and auto-scroll.
+            
+            // Wait, previously addLog did unshift (newest at top). Let's keep newest at top for visibility.
+            const reversedLogs = [...logs].reverse();
 
-    </span> <span class="log-msg" >${e.msg
-                }
+            list.innerHTML = reversedLogs.map(e => `
+                <div class="log-entry">
+                    <span class="log-time">${new Date(e.timestamp).toLocaleTimeString('zh-CN', {hour12: false})}</span>
+                    <span class="log-agent agent-${e.agent}">${e.agent.replace('Agent', '')}</span>
+                    <span class="log-text">${escapeHTML(e.text)}</span>
+                </div>
+            `).join('');
+        }
 
-    </span> </div> `).join('');
+        function escapeHTML(str) {
+            return str.replace(/[&<>'"]/g, 
+                tag => ({
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    "'": '&#39;',
+                    '"': '&quot;'
+                }[tag])
+            );
         }
 
         // ── HELPERS ──────────────────────────────────────────

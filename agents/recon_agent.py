@@ -183,6 +183,7 @@ class ReconAgent(BaseAgent):
             # 记录 think_log，让 Planner 感知需要补充知识，由 Planner 发 RAG 查询
             think_log = f"{think_log}\n[INFO_NEEDED] {info_needed}"
 
+
         # 如果 Agent 明确请求查知识库，生成 KNOWLEDGE_QUERY mutation
         if knowledge_query and knowledge_query.get("query"):
             kq_type = knowledge_query.get("type", "Methodology")

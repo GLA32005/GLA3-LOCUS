@@ -188,6 +188,7 @@ class CriticAgent(BaseAgent):
             f"scores={scores} tokens={tokens_used}"
         )
 
+
         if status == PayloadStatus.APPROVED:
             return self._make_approved_output(
                 payload=payload, scores=scores,

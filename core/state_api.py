@@ -702,3 +702,31 @@ class StateAPI:
                 datetime.now(timezone.utc)
             )]
         )
+
+    # ── LLM 思维链日志 ───────────────────────────────────────
+
+    async def push_llm_log(self, agent_role: str, text: str):
+        """将 Agent 的思考过程推入 Redis 列表，保留最近 50 条。"""
+        if not text:
+            return
+        log_entry = {
+            "agent": agent_role,
+            "text": text,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        key = "locus:llm_logs"
+        await self.redis.rpush(key, json_dumps(log_entry))
+        # 裁剪保留最近 50 条 (0-indexed, -50 to -1 is the last 50)
+        await self.redis.ltrim(key, -50, -1)
+
+    async def get_llm_logs(self, limit: int = 50) -> list[dict]:
+        """获取最近的 LLM 思考日志。"""
+        key = "locus:llm_logs"
+        raw_logs = await self.redis.lrange(key, -limit, -1)
+        logs = []
+        for raw in raw_logs:
+            try:
+                logs.append(json.loads(raw))
+            except json.JSONDecodeError:
+                pass
+        return logs

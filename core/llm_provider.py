@@ -56,25 +56,25 @@ ESCALATION_CONFIG = {
     "planner": {
         "threshold": 0.6,
         "garbage_threshold": 0.3,  # 低于此分直接丢弃，不升级
-        "max_local_retries": 1,
+        "max_local_retries": 0,
         "escalate_on_parse_fail": True,
     },
     "exploit": {
         "threshold": 0.7,
         "garbage_threshold": 0.3,
-        "max_local_retries": 1,
+        "max_local_retries": 0,
         "escalate_on_parse_fail": True,
     },
     "recon": {
         "threshold": 0.5,
         "garbage_threshold": 0.2,
-        "max_local_retries": 2,
+        "max_local_retries": 0,
         "escalate_on_parse_fail": False,
     },
     "critic": {
         "threshold": 0.0,          # Critic 有硬编码规则兜底，不需要升级
         "garbage_threshold": 0.0,
-        "max_local_retries": 2,
+        "max_local_retries": 0,
         "escalate_on_parse_fail": False,
     },
 }
@@ -87,6 +87,8 @@ _escalation_counts: dict[str, int] = {}
 _strong_budget = int(ConfigManager().get_all().get("llm", {}).get("strong_budget", 20))
 _strong_budget_used: int = 0
 _total_tokens: int = 0
+_total_tokens_base: int = 0
+_total_tokens_strong: int = 0
 
 
 def get_llm_stats() -> dict:
@@ -99,16 +101,20 @@ def get_llm_stats() -> dict:
         "strong_budget": f"{_strong_budget - _strong_budget_used}/{_strong_budget}",
         "escalation_rate": f"{sum(_escalation_counts.values()) / max(total, 1) * 100:.1f}%",
         "total_tokens": _total_tokens,
+        "total_tokens_base": _total_tokens_base,
+        "total_tokens_strong": _total_tokens_strong,
     }
 
 
 def reset_llm_stats():
     """每次新任务重置统计"""
-    global _local_calls, _escalation_counts, _strong_budget_used, _total_tokens
+    global _local_calls, _escalation_counts, _strong_budget_used, _total_tokens, _total_tokens_base, _total_tokens_strong
     _local_calls = 0
     _escalation_counts = {}
     _strong_budget_used = 0
     _total_tokens = 0
+    _total_tokens_base = 0
+    _total_tokens_strong = 0
 
 
 # ── API 格式检测 ──────────────────────────────────────────────
@@ -141,7 +147,7 @@ async def call_llm(
     单次 LLM 调用。
     返回 (response_text, tokens_used, was_escalated)
     """
-    global _local_calls, _strong_budget_used, _total_tokens
+    global _local_calls, _strong_budget_used, _total_tokens, _total_tokens_base, _total_tokens_strong
 
     if force_strong and _is_strong_available():
         if _strong_budget_used < _strong_budget:
@@ -157,6 +163,7 @@ async def call_llm(
             )
             text, tokens = await _call_single(system, prompt, strong_cfg, max_tokens)
             _total_tokens += tokens
+            _total_tokens_strong += tokens
             if text.strip():
                 logger.warning(
                     f"[{agent_role}] ✅ 大模型已响应 | "
@@ -177,6 +184,7 @@ async def call_llm(
     _local_calls += 1
     text, tokens = await _call_single(system, prompt, _get_local_config(), max_tokens)
     _total_tokens += tokens
+    _total_tokens_base += tokens
     return text, tokens, False
 
 
@@ -195,7 +203,7 @@ async def call_llm_with_escalation(
     2. 解析失败 or 置信度不足 → 升级大模型
     返回 (response_text, tokens_used, was_escalated)
     """
-    global _local_calls, _strong_budget_used, _total_tokens
+    global _local_calls, _strong_budget_used, _total_tokens, _total_tokens_base, _total_tokens_strong
 
     # 外部强制升级（如 stall 触发、新资产发现）
     if force_strong:
@@ -215,6 +223,7 @@ async def call_llm_with_escalation(
         _local_calls += 1
         text, tokens = await _call_single(system, prompt, _get_local_config(), max_tokens)
         _total_tokens += tokens
+        _total_tokens_base += tokens
         last_text = text
         last_tokens = tokens
 
@@ -241,18 +250,9 @@ async def call_llm_with_escalation(
             return text, tokens, False
 
         if conf is not None:
-            # 垃圾拦截：质量分极低 = 输出是幻觉/废话，升级也没用，直接丢弃
-            garbage_threshold = cfg.get("garbage_threshold", 0.3)
-            if conf < garbage_threshold:
-                logger.warning(
-                    f"[{agent_role}] ⛔ 输出质量分 {conf:.2f} < 垃圾阈值 {garbage_threshold}，"
-                    f"直接丢弃（不升级、不执行）"
-                )
-                return "", 0, False
-
             logger.info(
                 f"[{agent_role}] 输出质量分 {conf:.2f} < {threshold}，"
-                f"attempt={attempt + 1}/{max_retries + 1}"
+                f"本地模型能力不足，准备升级大模型 (attempt={attempt + 1}/{max_retries + 1})"
             )
             escalate_reason = f"质量分 {conf:.2f} < {threshold}"
 
@@ -274,6 +274,7 @@ async def call_llm_with_escalation(
         )
         text, tokens = await _call_single(system, prompt, strong_cfg, max_tokens)
         _total_tokens += tokens
+        _total_tokens_strong += tokens
         if text.strip():
             logger.warning(
                 f"[{agent_role}] ✅ 大模型已响应 | "

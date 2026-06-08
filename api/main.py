@@ -393,6 +393,18 @@ async def resume_system(state_api=Depends(_get_state_api)):
     return {"status": "resumed"}
 
 
+@app.get("/llm_logs",
+         summary="获取大模型思考日志 (LLM Chain of Thought)",
+         dependencies=[Depends(_require_key)])
+async def get_llm_logs(
+    limit: int = 50,
+    state_api=Depends(_get_state_api)
+):
+    """返回最新的 LLM 思考过程流"""
+    logs = await state_api.get_llm_logs(limit=limit)
+    return {"logs": logs}
+
+
 # ── 启动入口（直接运行 uvicorn）──────────────────────────────
 
 if __name__ == "__main__":

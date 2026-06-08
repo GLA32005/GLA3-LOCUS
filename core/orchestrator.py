@@ -317,6 +317,11 @@ class Orchestrator:
             )
             # 消费完 hint 后清除，避免污染后续正常 Think
             self._system_hint = None
+
+            # 记录大模型思维链
+            think_log = planner_output.get("think")
+            if think_log:
+                await self.state_api.push_llm_log("PlannerAgent", think_log)
             
             await self._dispatch_planner_output(planner_output)
             await self._print_progress()
@@ -480,12 +485,15 @@ class Orchestrator:
             agent_type = AgentType.RECON
 
         # 问题 #2 修复：Goal-Agent 一致性保护
-        # 如果当前 goal 是 EXPLOIT，但 Planner 返回 agent=recon，强制纠正
+        # 如果当前 goal 是 EXPLOIT，但 Planner 明确返回 agent=recon，说明它在当前阶段无思路，想退回重新探测。
+        # 我们应该尊重 Planner 的决定，将 goal 同步退回 RECON，避免陷入死循环盲打。
         if agent_type == AgentType.RECON and new_goal == "EXPLOIT":
-            logger.warning(
-                f"Planner 在 EXPLOIT 阶段返回 recon，强制纠正为 exploit"
+            logger.info(
+                f"Planner 在 EXPLOIT 阶段返回 recon，允许退回 RECON 并同步更新目标阶段"
             )
-            agent_type = AgentType.EXPLOIT
+            new_goal = "RECON"
+            # 必须立刻更新状态机中的 current_goal，以防后续逻辑冲突
+            await self.state_api.update_focus_atomic({"current_goal": "RECON"})
 
         handler = agent_map.get(agent_type)
         if handler:
@@ -951,6 +959,8 @@ class Orchestrator:
             agent_id=f"recon_{time.time()}"
         )
         result = await self.recon_agent.run(node_input)
+        if result.think_log:
+            await self.state_api.push_llm_log("ReconAgent", result.think_log)
         await self._apply_node_output(result)
 
     async def _invoke_exploit(self, act: dict, planner_output: dict):
@@ -982,6 +992,8 @@ class Orchestrator:
             agent_id=f"exploit_{time.time()}"
         )
         result = await self.exploit_agent.run(node_input)
+        if result.think_log:
+            await self.state_api.push_llm_log("ExploitAgent", result.think_log)
         await self._apply_node_output(result)
 
     async def _invoke_exploit_fixup(self, payload_id: str,
@@ -1014,6 +1026,8 @@ class Orchestrator:
             agent_id=f"exploit_fixup_{time.time()}"
         )
         result = await self.exploit_agent.run(node_input)
+        if result.think_log:
+            await self.state_api.push_llm_log("ExploitAgent", result.think_log)
         await self._apply_node_output(result)
 
     async def _invoke_critic(self, act: dict, planner_output: dict):
@@ -1032,6 +1046,8 @@ class Orchestrator:
                 agent_id=f"critic_{time.time()}"
             )
             result = await self.critic_agent.run(node_input)
+            if result.think_log:
+                await self.state_api.push_llm_log("CriticAgent", result.think_log)
             await self._apply_node_output(result)
 
     async def _invoke_cleanup(self, act: dict, planner_output: dict):
