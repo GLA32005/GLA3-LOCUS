@@ -289,6 +289,16 @@ async def _run_main_loop(mission: dict, clean: bool, mode: str, config):
     mission["scope_expanded"] = resolved
     await state_api.redis.set("mission", json.dumps(mission))
 
+    # 无论是否 resume，启动时将 stall_count 归零，避免继承历史 exhausted 状态导致秒退
+    focus_str = await state_api.redis.get("focus")
+    if focus_str:
+        try:
+            focus = json.loads(focus_str)
+            focus["stall_count"] = 0
+            await state_api.redis.set("focus", json.dumps(focus))
+        except Exception:
+            pass
+
     # 构建组件
     event_bus = EventBus()
     executor = Executor(state_api=state_api, event_bus=event_bus)
