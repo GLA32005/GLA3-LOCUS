@@ -207,6 +207,7 @@ class Executor:
     def _is_in_scope(self, target: str, scope: list[str]) -> bool:
         """硬编码 scope 校验，拒绝所有越界目标（包括域名）"""
         import ipaddress
+        import socket
         if not target or not scope:
             return False
         ip_str = target.split(":")[0]  # 去掉端口
@@ -220,6 +221,16 @@ class Executor:
             # 域名或 CIDR 网段直接匹配
             if ip_str in scope:
                 return True
+            # 尝试轻量级解析域名，并判断解析后的 IP 是否在 scope 内
+            try:
+                resolved_ip = socket.gethostbyname(ip_str)
+                ip_obj = ipaddress.ip_address(resolved_ip)
+                return any(
+                    ip_obj in ipaddress.ip_network(cidr, strict=False)
+                    for cidr in scope
+                )
+            except (socket.gaierror, ValueError):
+                pass
             return False
 
     # ════════════════════════════════════════════════════════════
@@ -264,6 +275,25 @@ class Executor:
                 f"Executor: 沙箱拦截 payload={payload_id} "
                 f"reason={sandbox_result.reason}"
             )
+            if "MANUAL_REVIEW_REQUIRED" in sandbox_result.reason:
+                await self._update_payload_status(payload_id, PayloadStatus.REQUIRES_APPROVAL)
+                from core.protocols import EventPriority
+                await self.event_bus.publish(Event(
+                    type=EventType.HUMAN_APPROVAL_REQ,
+                    source="executor",
+                    priority=EventPriority.CRITICAL,
+                    payload={
+                        "payload_id": payload_id,
+                        "agent_id": agent_id,
+                        "action": "EXPLOIT_SANDBOX_BYPASS",
+                        "target": target,
+                        "technique": payload.get("technique", ""),
+                        "reason": sandbox_result.reason,
+                        "content_preview": content[:100],
+                    }
+                ))
+                return
+
             await self._record_vector(
                 payload=payload,
                 result=VectorResult.SANDBOX_FAIL,

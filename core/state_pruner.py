@@ -88,15 +88,20 @@ class StatePruner:
         # ── 6b. pending recon 任务列表（精简，供 Recon Agent 去重）──
         pending_recon = await state_api.get_pending_recon_tasks()
         all_recon = await state_api._get_items_by_index("idx:recon_task_ids", "recon_task:")
+        all_async = await state_api._get_items_by_index("idx:async_task_ids", "async_task:")
         
-        running_recon = [t for t in all_recon if t.get("status") == TaskStatus.RUNNING]
+        all_tasks = all_recon + all_async
+        
+        running_recon = [t for t in all_tasks if t.get("status") == TaskStatus.RUNNING]
+        pending_and_running = pending_recon + running_recon + [t for t in all_async if t.get("status") == TaskStatus.PENDING]
+        
         view["pending_recon_list"] = [
             {"target": t.get("target"), "tool": t.get("tool"), "status": t.get("status")}
-            for t in (pending_recon + running_recon)
+            for t in pending_and_running
         ]
 
         completed_recon = [
-            t for t in all_recon 
+            t for t in all_tasks 
             if t.get("status") in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.TIMEOUT)
         ]
         completed_recon = sorted(completed_recon, key=lambda x: x.get("updated_at", 0), reverse=True)[:15]

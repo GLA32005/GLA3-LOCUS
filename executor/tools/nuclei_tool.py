@@ -107,12 +107,20 @@ class NucleiTool(BaseTool):
     def _build_assets(self, target: str, findings: list[dict]) -> list[dict]:
         """
         将漏洞发现附加为 Service 节点的 vuln_* 属性。
-        简化：返回含 `vulns` 列表的 Host 资产节点。
+        保留端口信息以维持服务级上下文。
         """
         if not findings:
             return []
 
-        ip = target.split(":")[0]
+        # 提取目标 IP 和 Port
+        target_stripped = target.split("://")[-1] if "://" in target else target
+        ip = target_stripped.split(":")[0]
+        
+        if ":" in target_stripped:
+            port = int(target_stripped.split(":")[1].split("/")[0])
+        else:
+            port = 443 if target.startswith("https") else 80
+
         vulns = []
         for f in findings:
             info = f.get("info", {})
@@ -126,7 +134,11 @@ class NucleiTool(BaseTool):
 
         return [{
             "ip":      ip,
-            "vulns":   vulns,          # 额外字段，写入 Host 节点
+            "services": [{
+                "port": port,
+                "proto": "tcp",
+                "vulns_json": json.dumps(vulns)
+            }],
             "confidence": 0.9,
         }]
 

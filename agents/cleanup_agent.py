@@ -134,23 +134,28 @@ class CleanupAgent(BaseAgent):
             footprints,
             key=lambda x: x.get("ts", ""),
             reverse=True,
-        )[:_MAX_FOOTPRINTS]
+        )
 
-        try:
-            tasks = await self._call_llm(sorted_fp, mission, trigger)
-        except Exception as e:
-            logger.error(f"CleanupAgent LLM 失败: {e}")
+        all_tasks = []
+        # 分批处理，避免单次 Prompt 超长而截断早期痕迹
+        for i in range(0, len(sorted_fp), _MAX_FOOTPRINTS):
+            chunk = sorted_fp[i:i + _MAX_FOOTPRINTS]
+            try:
+                tasks = await self._call_llm(chunk, mission, trigger)
+                if tasks:
+                    all_tasks.extend(tasks)
+            except Exception as e:
+                logger.error(f"CleanupAgent LLM chunk 失败: {e}")
+
+        if not all_tasks:
             return NodeOutput(mutations=[], events=[])
 
-        if not tasks:
-            return NodeOutput(mutations=[], events=[])
-
-        mutations = self._build_mutations(tasks)
-        events    = self._build_events(tasks, mission, trigger)
+        mutations = self._build_mutations(all_tasks)
+        events    = self._build_events(all_tasks, mission, trigger)
 
         logger.info(
-            f"CleanupAgent: {len(tasks)} cleanup tasks generated "
-            f"({sum(1 for t in tasks if not t.get('reversible', True))} irreversible)"
+            f"CleanupAgent: {len(all_tasks)} cleanup tasks generated "
+            f"({sum(1 for t in all_tasks if not t.get('reversible', True))} irreversible)"
         )
         return NodeOutput(mutations=mutations, events=events)
 

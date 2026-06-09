@@ -109,8 +109,8 @@ class ExternalSandbox:
 
         # ── Docker 语法检查 ──────────────────────────────────
         if not self._docker_available:
-            logger.warning("❗ ExternalSandbox: Docker 不可用，跳过容器检查，仅以静态匹配通过 (degraded_security)")
-            return SandboxResult(passed=True, reason="static_only: degraded_security")
+            logger.warning("❗ ExternalSandbox: Docker 不可用，阻断拦截要求人工审批")
+            return SandboxResult(passed=False, reason="MANUAL_REVIEW_REQUIRED: no_docker_available")
 
         return await self._run_in_docker(content, executor_hint)
 
@@ -129,8 +129,8 @@ class ExternalSandbox:
             check_cmd = ["python3", "-c",
                          f"import ast; ast.parse({repr(content)})"]
         else:
-            # powershell / cmd：降级为静态通过（沙箱无法轻易检查）
-            return SandboxResult(passed=True, reason="no_syntax_check_for_hint")
+            # powershell / cmd：无法安全验证，强制走人工审批
+            return SandboxResult(passed=False, reason="MANUAL_REVIEW_REQUIRED: no_syntax_check_for_hint")
 
         t0 = time.time()
         try:
@@ -157,7 +157,7 @@ class ExternalSandbox:
 
             stderr_str = stderr.decode(errors="replace")
 
-            # exit ≥ 125 或 Docker 基础设施错误（镜像未拉取等）→ 降级静态通过
+            # exit ≥ 125 或 Docker 基础设施错误（镜像未拉取等）→ 要求人工审批
             if proc.returncode >= 125 or any(sig in stderr_str for sig in (
                 "Unable to find image", "pull access denied",
                 "manifest unknown", "no such file or directory: runsc",
@@ -165,11 +165,11 @@ class ExternalSandbox:
             )):
                 logger.warning(
                     f"❗ ExternalSandbox: Docker 基础设施验证失败 "
-                    f"(exit={proc.returncode}, err={stderr_str[:100]})，沙箱防护降级为静态通过"
+                    f"(exit={proc.returncode}, err={stderr_str[:100]})，阻断拦截要求人工审批"
                 )
                 return SandboxResult(
-                    passed=True,
-                    reason=f"docker_infra_passthrough: exit={proc.returncode} degraded_security",
+                    passed=False,
+                    reason=f"MANUAL_REVIEW_REQUIRED: docker_infra_failed_exit_{proc.returncode}",
                 )
 
             passed = proc.returncode == 0
@@ -194,5 +194,5 @@ class ExternalSandbox:
             )
         except Exception as e:
             logger.error(f"ExternalSandbox 异常: {e}")
-            # Docker 本身异常时降级为静态通过，不阻塞主流程
-            return SandboxResult(passed=True, reason=f"docker_error_passthrough: {e}")
+            # Docker 本身异常时要求人工审批
+            return SandboxResult(passed=False, reason=f"MANUAL_REVIEW_REQUIRED: docker_error_passthrough: {e}")

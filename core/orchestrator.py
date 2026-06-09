@@ -133,7 +133,7 @@ class Orchestrator:
         if not self._is_running:
             return
         logger.error(
-            f"Cleanup 超时 (120s)，原因: {reason}，强制停止 Orchestrator"
+            f"Cleanup 超时 (900s)，原因: {reason}，强制停止 Orchestrator"
         )
         self.stop()
 
@@ -239,6 +239,15 @@ class Orchestrator:
             if now - self._last_think_time >= self.MIN_THINK_INTERVAL:
                 is_paused = await self.state_api.is_paused()
                 if not self._in_cleanup and not is_paused:
+                    # 主动轮询式兜底检查：如果不依赖事件机制，发现所有目标都不可达直接退出
+                    scope = mission.get("scope_expanded", mission.get("scope", []))
+                    if scope:
+                        unreachable = await self.state_api.get_unreachable_targets()
+                        if all(t in unreachable for t in scope):
+                            logger.warning("主动检查发现所有 scope 目标皆不可达，强制进入清理阶段")
+                            await self._force_cleanup("all_targets_unreachable_proactive")
+                            return
+                            
                     await self._trigger_think()
                     await self.check_cleanup_trigger()
                 elif is_paused:
@@ -453,10 +462,15 @@ class Orchestrator:
         
         # B2 修复：移除重复的 stall_count 递增
         # stall_count 的唯一递增点在 _apply_node_output 中，当 Agent 未生成有效任务时才递增
+        
+        # [缺陷三修复]：切断 Planner 对系统级关键字段的逆向覆写
+        # 大模型有时会幻觉输出 prompt 中的 stall_count 并试图覆写它，导致底层递增逻辑失效
+        if "stall_count" in updates:
+            del updates["stall_count"]
             
         await self.state_api.update_focus_atomic(updates)
-        # 读取真实 stall 值用于日志（updates 中可能不含 stall_count）
-        real_stall = updates.get('stall_count', current_focus.get('stall_count', 0))
+        # 读取真实 stall 值用于日志（updates 中不含 stall_count）
+        real_stall = current_focus.get('stall_count', 0)
         logger.info(
             f"Focus updated: goal={updates.get('current_goal')} "
             f"target={updates.get('active_target', current_focus.get('active_target'))} "
@@ -504,7 +518,10 @@ class Orchestrator:
                     self._consecutive_recon_rounds = 0
                     self._last_known_hosts = current_hosts
                 else:
-                    self._consecutive_recon_rounds += 1
+                    if self._active_executor_tasks == 0:
+                        self._consecutive_recon_rounds += 1
+                    else:
+                        logger.debug(f"当前有 {self._active_executor_tasks} 个后台任务执行中，暂停累加连续 RECON 轮次")
 
                 RECON_ROUND_LIMIT = 10
                 if self._consecutive_recon_rounds >= RECON_ROUND_LIMIT:
@@ -1269,9 +1286,9 @@ class Orchestrator:
                 if target and tool:
                     params_str = json.dumps(payload.get("params", {}), sort_keys=True)
                     import hashlib
-                    # port_scan/nmap: 按 tool:target 去重（忽略 params 差异）
-                    # 防止 LLM 用不同参数（top-1000 vs -p 1-1024 等）绕过去重
-                    _TARGET_LEVEL_DEDUP_TOOLS = {"port_scan", "nmap", "port_scan_full"}
+                    # [缺陷一修复]：扩大目标级去重范围，防止大模型对同一目标的同类工具产生微小参数变动而打穿去重机制
+                    # 如果被打穿且这些任务执行得极快，会导致 Orchestrator 死循环并不断累加 _consecutive_recon_rounds
+                    _TARGET_LEVEL_DEDUP_TOOLS = {"port_scan", "nmap", "port_scan_full", "dir_enum", "vuln_scan", "screenshot"}
                     if tool in _TARGET_LEVEL_DEDUP_TOOLS:
                         cmd_hash = hashlib.md5(f"{tool}:{target}".encode()).hexdigest()[:12]
                     else:

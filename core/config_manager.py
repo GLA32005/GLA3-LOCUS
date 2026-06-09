@@ -44,7 +44,8 @@ DEFAULTS = {
         "strong_base_url": "https://api.deepseek.com",
         "strong_api_key": "",
         "strong_model": "deepseek-v4-flash",
-        "strong_budget": 20,
+        "strong_budget": 50,# 默认 20 次
+
     },
     "storage": {
         "redis_url": "redis://localhost:6379",
