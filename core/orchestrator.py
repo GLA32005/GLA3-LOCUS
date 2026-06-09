@@ -275,6 +275,10 @@ class Orchestrator:
         触发一次 Planner Think。
         force=True 时忽略间隔限制（CRITICAL 事件使用）。
         """
+        if self._in_cleanup:
+            logger.debug("Orchestrator: In cleanup state, skipping Think trigger")
+            return
+
         now = time.time()
         interval = (self.CRITICAL_THINK_INTERVAL if force
                     else self.MIN_THINK_INTERVAL)
