@@ -125,6 +125,7 @@ locus scan target.com
 ├── main.py             # Locus CLI 入口程序
 └── requirements.txt    # 依赖清单
 ```
+<img width="1278" height="1018" alt="截屏2026-06-09 17 11 44" src="https://github.com/user-attachments/assets/47f65350-a4ec-4811-a37e-58d6b02f011a" />
 
 ---
 
