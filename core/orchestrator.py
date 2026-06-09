@@ -293,6 +293,24 @@ class Orchestrator:
         try:
             pruned_view = await self.pruner.generate_view(self.state_api)
             focus = pruned_view.get("focus", {})
+            current_goal = focus.get("current_goal")
+
+            # 问题 #6 修复：如果任务队列积压，暂停主动轮询 Planner (防止无限烧 token 空转)
+            if not force:
+                pending_recon = pruned_view.get("pending_recon_list", [])
+                pending_recon_count = sum(1 for t in pending_recon if t.get("status") in ("PENDING", "RUNNING"))
+                if current_goal == "RECON" and pending_recon_count >= 3:
+                    logger.debug(f"Orchestrator: RECON 任务积压 ({pending_recon_count}>=3)，挂起 Planner Think。")
+                    self._is_thinking = False
+                    return
+
+                pending_summary = pruned_view.get("pending_summary", {})
+                pending_exploit_count = pending_summary.get("payloads_pending", 0)
+                if current_goal == "EXPLOIT" and pending_exploit_count >= 5:
+                    logger.debug(f"Orchestrator: EXPLOIT 任务积压 ({pending_exploit_count}>=5)，挂起 Planner Think。")
+                    self._is_thinking = False
+                    return
+
             active_target = focus.get("active_target")
             if active_target and await self.state_api.is_unreachable(active_target):
                 unreach_hint = (
@@ -500,8 +518,12 @@ class Orchestrator:
 
         # 问题 #2 修复：Goal-Agent 一致性保护
         # 如果当前 goal 是 EXPLOIT，但 Planner 明确返回 agent=recon，说明它在当前阶段无思路，想退回重新探测。
-        # 我们应该尊重 Planner 的决定，将 goal 同步退回 RECON，避免陷入死循环盲打。
-        if agent_type == AgentType.RECON and new_goal == "EXPLOIT":
+        # 但如果是我们在上面强行把 goal 覆盖为 EXPLOIT 的（was_overridden=True），那么我们连 agent 也必须一起强行覆盖，
+        # 否则就会被这段逻辑又退回 RECON，从而造成在 RECON -> EXPLOIT -> RECON 之间无限跳跃的死循环。
+        if was_overridden and agent_type == AgentType.RECON:
+            logger.warning("Orchestrator: 同步强行将 Agent 覆盖为 exploit 以匹配 Goal 的强制跳转")
+            agent_type = AgentType.EXPLOIT
+        elif agent_type == AgentType.RECON and new_goal == "EXPLOIT":
             logger.info(
                 f"Planner 在 EXPLOIT 阶段返回 recon，允许退回 RECON 并同步更新目标阶段"
             )
@@ -813,6 +835,24 @@ class Orchestrator:
                 logger.error(f"检查清理任务状态时出错: {e}")
                 
             await asyncio.sleep(2.0)
+
+        # 4. 清理残留的未完成任务状态（改为 FAILED），防止前端显示幽灵任务
+        try:
+            logger.info("清理未完成的残留任务状态...")
+            import json
+            for idx_key, prefix in [
+                ("idx:recon_task_ids", "recon_task:"),
+                ("idx:async_task_ids", "async_task:"),
+                ("idx:payload_ids", "payload:")
+            ]:
+                items = await self.state_api._get_items_by_index(idx_key, prefix)
+                for t in items:
+                    if t.get("status") in ("PENDING", "RUNNING", "EXECUTING"):
+                        t["status"] = "FAILED"
+                        t["error"] = "扫描已停止，任务未完成。"
+                        await self.state_api.redis.set(f"{prefix}{t['id']}", json.dumps(t))
+        except Exception as e:
+            logger.error(f"清理残留任务状态时出错: {e}")
 
         self.stop()
 

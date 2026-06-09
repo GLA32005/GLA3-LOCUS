@@ -262,6 +262,28 @@ async def get_progress(state_api=Depends(_get_state_api)):
         vectors = await state_api.get_vectors_summary()
         done_tasks = await state_api.get_done_tasks()
 
+        recon_items = await state_api._get_items_by_index("idx:recon_task_ids", "recon_task:")
+        total_recon = len(recon_items)
+        done_recon = sum(1 for t in recon_items if t.get("status") in ("DONE", "FAILED", "TIMEOUT"))
+
+        async_items = await state_api._get_items_by_index("idx:async_task_ids", "async_task:")
+        total_async = len(async_items)
+        done_async = sum(1 for t in async_items if t.get("status") in ("DONE", "FAILED", "TIMEOUT"))
+
+        all_tasks_list = []
+        for t in (recon_items + async_items):
+            status = t.get("status", "UNKNOWN")
+            all_tasks_list.append({
+                "id": t.get("id"),
+                "type": "侦察" if t in recon_items else "异步",
+                "tool": t.get("tool", "unknown"),
+                "target": t.get("target", "unknown"),
+                "status": status,
+                "created_at": t.get("created_at", 0)
+            })
+        all_tasks_list.sort(key=lambda x: x["created_at"], reverse=True)
+        all_tasks_list = all_tasks_list[:50] # Keep only latest 50 to prevent bloat
+
         # LLM 升级统计
         try:
             from core.llm_provider import get_llm_stats
@@ -299,6 +321,13 @@ async def get_progress(state_api=Depends(_get_state_api)):
                 "vectors_total":   vectors.get("total", 0),
                 "vectors_success": vectors.get("success_count", 0),
             },
+            "tasks_summary": {
+                "recon_total": total_recon,
+                "recon_done": done_recon,
+                "async_total": total_async,
+                "async_done": done_async,
+            },
+            "all_tasks_list": all_tasks_list,
             "pending_tasks": len(done_tasks),
             "llm_stats": llm_stats,
         }

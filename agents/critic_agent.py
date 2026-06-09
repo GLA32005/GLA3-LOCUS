@@ -56,8 +56,8 @@ _DOS_PATTERNS: tuple[str, ...] = (
 
 _DOS_THRESHOLD         = 0.5
 _COMPLIANCE_THRESHOLD  = 0.5
-_STABILITY_THRESHOLD   = 0.8
-_NOISE_THRESHOLD       = 0.7
+_STABILITY_THRESHOLD   = 0.5
+_NOISE_THRESHOLD       = 0.85
 
 # ── LLM System Prompt ────────────────────────────────────────
 
@@ -66,8 +66,8 @@ _CRITIC_SYSTEM = """\
 你的任务是对一个 payload 进行四维安全评分，决定是否允许执行。
 
 ## 评分维度（均为 0.0-1.0 的浮点数）
-- noise:           EDR 遥测触发量。0=几乎无日志；1=多条高保真告警。
-- stability:       沙箱语法成功率。0=必定报错/崩溃；1=稳定可执行。
+- noise:           EDR 遥测触发量。0=几乎无日志；1=极度嘈杂(如全端口全速扫描、破坏性动作)。常规漏洞扫描和普通利用请给 0.3-0.6。
+- stability:       沙箱语法成功率。0=明显语法错误；1=语法完全正确。绝大多数标准命令或常见脚本都应给 0.9-1.0。
 - destructiveness: DoS/破坏性风险。0=完全安全；1=会造成数据丢失或服务中断。
     【极度重要】破坏性仅指：永久性数据删除、破坏系统配置、导致系统崩溃或拒绝服务（DoS）。像读取文件、下载工具(curl/wget)、执行爆破(hydra/ssh)等操作，不管有多敏感或非法，其 destructiveness 必须小于 0.3。高噪音不等于高破坏性！
 - compliance:      目标合规性。0=目标在 scope 之外；1=目标完全在授权范围内。
@@ -358,8 +358,8 @@ class CriticAgent(BaseAgent):
         if comp < _COMPLIANCE_THRESHOLD:
             return PayloadStatus.BLOCKED, RejectReason.OUT_OF_SCOPE
 
-        # C1c 修复：沙箱降级时收紧 stability 阈值（0.8 -> 0.9）
-        stab_threshold = 0.9 if getattr(self, '_sandbox_degraded', False) else _STABILITY_THRESHOLD
+        # C1c 修复：沙箱降级时收紧 stability 阈值
+        stab_threshold = 0.65 if getattr(self, '_sandbox_degraded', False) else _STABILITY_THRESHOLD
         if stab < stab_threshold:
             return PayloadStatus.BLOCKED, RejectReason.SYNTAX_ERROR
 

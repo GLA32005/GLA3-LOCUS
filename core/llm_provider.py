@@ -89,7 +89,8 @@ _strong_budget_used: int = 0
 _total_tokens: int = 0
 _total_tokens_base: int = 0
 _total_tokens_strong: int = 0
-
+_total_duration: float = 0.0
+_successful_calls: int = 0
 
 def get_llm_stats() -> dict:
     """供 /progress API 暴露统计"""
@@ -103,18 +104,22 @@ def get_llm_stats() -> dict:
         "total_tokens": _total_tokens,
         "total_tokens_base": _total_tokens_base,
         "total_tokens_strong": _total_tokens_strong,
+        "avg_response_time": f"{_total_duration / _successful_calls:.2f}s" if _successful_calls > 0 else "0.00s",
+        "total_response_time": f"{_total_duration:.2f}s",
     }
 
 
 def reset_llm_stats():
     """每次新任务重置统计"""
-    global _local_calls, _escalation_counts, _strong_budget_used, _total_tokens, _total_tokens_base, _total_tokens_strong
+    global _local_calls, _escalation_counts, _strong_budget_used, _total_tokens, _total_tokens_base, _total_tokens_strong, _total_duration, _successful_calls
     _local_calls = 0
     _escalation_counts = {}
     _strong_budget_used = 0
     _total_tokens = 0
     _total_tokens_base = 0
     _total_tokens_strong = 0
+    _total_duration = 0.0
+    _successful_calls = 0
 
 
 # ── API 格式检测 ──────────────────────────────────────────────
@@ -376,7 +381,10 @@ async def _do_request(
     url: str, headers: dict, payload: dict, parse_fn
 ) -> tuple[str, int]:
     """通用 HTTP 请求，含指数退避重试"""
+    import time
     max_retries = 3
+    start_time = time.time()
+
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient(timeout=180.0, trust_env=False) as client:
@@ -387,7 +395,12 @@ async def _do_request(
                     await asyncio.sleep(wait)
                     continue
                 resp.raise_for_status()
-                return parse_fn(resp.json())
+                parsed_res = parse_fn(resp.json())
+                duration = time.time() - start_time
+                global _total_duration, _successful_calls
+                _total_duration += duration
+                _successful_calls += 1
+                return parsed_res
         except (httpx.HTTPError, KeyError) as e:
             if attempt == max_retries - 1:
                 logger.error(f"LLM 调用在 {max_retries} 次重试后失败: {e}")

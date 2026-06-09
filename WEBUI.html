@@ -652,10 +652,119 @@
             color: var(--green);
         }
 
+        /* ── WORKFLOW GRAPH ── */
+        .workflow-graph {
+            padding: 20px;
+            background: var(--bg2);
+            overflow-y: auto;
+            max-height: 450px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .wf-phase {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.015);
+            border: 1px dashed var(--border2);
+            border-radius: 8px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .wf-phase-title {
+            font-weight: bold;
+            color: var(--text-dim);
+            margin-bottom: 16px;
+            font-size: 12px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        .wf-phase-title.active {
+            color: var(--blue);
+        }
+
+        .wf-nodes {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            justify-content: center;
+            width: 100%;
+        }
+
+        .wf-node {
+            padding: 10px 14px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.03);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 120px;
+            position: relative;
+        }
+
+        .wf-node.done {
+            border-color: var(--green);
+            border-top: 3px solid var(--green);
+        }
+
+        .wf-node.running {
+            border-color: var(--blue);
+            border-top: 3px solid var(--blue);
+            animation: pulse 2s infinite;
+        }
+
+        .wf-node.pending {
+            border-color: var(--yellow);
+            border-top: 3px solid var(--yellow);
+        }
+
+        .wf-node.failed {
+            border-color: var(--red);
+            border-top: 3px solid var(--red);
+        }
+
+        .wf-arrow {
+            height: 24px;
+            width: 2px;
+            background: var(--border2);
+            margin: 4px 0;
+            position: relative;
+        }
+
+        .wf-arrow::after {
+            content: '';
+            position: absolute;
+            bottom: -4px;
+            left: -4px;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 5px solid var(--border2);
+        }
+
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(50, 50, 130, 0.2);
+            }
+
+            70% {
+                box-shadow: 0 0 0 6px rgba(50, 50, 130, 0);
+            }
+
+            100% {
+                box-shadow: 0 0 0 0 rgba(50, 50, 130, 0);
+            }
+        }
+
         /* ── LLM THOUGHTS LOG ── */
         .log-list {
             padding: 8px 16px;
-            max-height: 250px;
+            max-height: 450px;
             overflow-y: auto;
             font-family: var(--mono);
             font-size: 11px;
@@ -668,7 +777,7 @@
             display: flex;
             align-items: flex-start;
             gap: 8px;
-            padding: 6px 8px;
+            padding: 8px;
             border-radius: 4px;
             line-height: 1.4;
             color: var(--text);
@@ -678,8 +787,14 @@
         }
 
         @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(-4px); }
-            to { opacity: 1; }
+            from {
+                opacity: 0;
+                transform: translateY(-4px);
+            }
+
+            to {
+                opacity: 1;
+            }
         }
 
         .log-time {
@@ -698,10 +813,34 @@
             flex-shrink: 0;
         }
 
-        .agent-PlannerAgent { background: rgba(160, 150, 200, 0.15); color: #a596c8; border: 0.5px solid rgba(160, 150, 200, 0.3); }
-        .agent-ReconAgent { background: rgba(150, 200, 180, 0.15); color: #96c8b4; border: 0.5px solid rgba(150, 200, 180, 0.3); }
-        .agent-ExploitAgent { background: rgba(200, 150, 160, 0.15); color: #c896a0; border: 0.5px solid rgba(200, 150, 160, 0.3); }
-        .agent-CriticAgent { background: rgba(200, 180, 150, 0.15); color: #c8b496; border: 0.5px solid rgba(200, 180, 150, 0.3); }
+        .log-card {
+            flex: 1;
+            word-break: break-all;
+        }
+
+        .agent-PlannerAgent {
+            background: rgba(160, 150, 200, 0.15);
+            color: #a596c8;
+            border: 0.5px solid rgba(160, 150, 200, 0.3);
+        }
+
+        .agent-ReconAgent {
+            background: rgba(150, 200, 180, 0.15);
+            color: #96c8b4;
+            border: 0.5px solid rgba(150, 200, 180, 0.3);
+        }
+
+        .agent-ExploitAgent {
+            background: rgba(200, 150, 160, 0.15);
+            color: #c896a0;
+            border: 0.5px solid rgba(200, 150, 160, 0.3);
+        }
+
+        .agent-CriticAgent {
+            background: rgba(200, 180, 150, 0.15);
+            color: #c8b496;
+            border: 0.5px solid rgba(200, 180, 150, 0.3);
+        }
 
         .log-text {
             flex: 1;
@@ -909,6 +1048,19 @@
                         </div><span style="color:var(--cyan);font-size:12px;" id="confVal">0%</span>
                     </div>
                 </div>
+            </div><!-- TASKS -->
+            <div class="sidebar-section">
+                <div class="section-label">任务队列</div>
+                <div class="kpi-grid">
+                    <div class="kpi blue">
+                        <div class="kpi-val"><span id="reconDone">0</span>/<span id="reconTotal">0</span></div>
+                        <div class="kpi-label">侦察任务</div>
+                    </div>
+                    <div class="kpi purple">
+                        <div class="kpi-val"><span id="asyncDone">0</span>/<span id="asyncTotal">0</span></div>
+                        <div class="kpi-label">异步任务</div>
+                    </div>
+                </div>
             </div><!-- LLM STATS -->
             <div class="sidebar-section">
                 <div class="section-label">模型调用</div>
@@ -919,12 +1071,16 @@
                             id="llmUpgrade">—</span></div>
                     <div class="llm-row"><span class="llm-label">预算剩余</span><span class="llm-val"
                             id="llmBudget">—</span></div>
-                    <div class="llm-row"><span class="llm-label">基础 Token</span><span class="llm-val"
+                    <div class="llm-row"><span class="llm-label">基础Token</span><span class="llm-val"
                             id="llmTokensBase">—</span></div>
                     <div class="llm-row"><span class="llm-label">Strong Token</span><span class="llm-val"
                             id="llmTokensStrong">—</span></div>
-                    <div class="llm-row"><span class="llm-label">总 Token</span><span class="llm-val"
+                    <div class="llm-row"><span class="llm-label">总Token</span><span class="llm-val"
                             id="llmTokens">—</span></div>
+                    <div class="llm-row"><span class="llm-label">总耗时</span><span class="llm-val"
+                            id="llmTotalTime">—</span></div>
+                    <div class="llm-row"><span class="llm-label">平均耗时</span><span class="llm-val"
+                            id="llmAvgTime">—</span></div>
                 </div>
             </div><!-- API CONFIG -->
             <div class="sidebar-section" style="flex:1;">
@@ -966,28 +1122,23 @@
                         <div class="vector-stat-label">待审批</div>
                     </div>
                 </div>
-            </div><!-- TASKS+PAYLOADS -->
-            <div class="two-col"><!-- RECON TASKS -->
+            </div><!-- WORKFLOW AND LOGS -->
+            <div class="two-col">
+                <!-- EXECUTION WORKFLOW -->
                 <div class="panel">
-                    <div class="panel-header"><span class="panel-title">Recon 任务</span><span class="panel-badge"
-                            id="taskCount">0</span></div>
-                    <div class="task-list" id="taskList">
-                        <div class="empty-state">暂无任务数据</div>
-                    </div>
-                </div><!-- PAYLOADS -->
-                <div class="panel">
-                    <div class="panel-header"><span class="panel-title">Payload 队列</span><span class="panel-badge"
-                            id="payloadCount">0</span></div>
-                    <div class="task-list" id="payloadList">
-                        <div class="empty-state">暂无 Payload</div>
+                    <div class="panel-header"><span class="panel-title">执行拓扑 (Execution Workflow)</span><span
+                            class="panel-badge" id="workflowCount">0</span></div>
+                    <div class="workflow-graph" id="workflowList">
+                        <div class="empty-state">等待任务流生成...</div>
                     </div>
                 </div>
-            </div><!-- LLM THOUGHTS LOG -->
-            <div class="panel">
-                <div class="panel-header"><span class="panel-title">大模型思维链 (Agent Thoughts)</span><span class="panel-badge"
-                        id="logCount">0</span></div>
-                <div class="log-list" id="logList">
-                    <div class="empty-state">等待数据...</div>
+                <!-- LLM THOUGHTS LOG -->
+                <div class="panel">
+                    <div class="panel-header"><span class="panel-title">思维链 (Agent Thoughts)</span><span
+                            class="panel-badge" id="logCount">0</span></div>
+                    <div class="log-list" id="logList">
+                        <div class="empty-state">等待数据...</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1134,60 +1285,120 @@
             setText('llmTokensBase', llm.total_tokens_base ?? '—');
             setText('llmTokensStrong', llm.total_tokens_strong ?? '—');
             setText('llmTokens', llm.total_tokens ?? '—');
+            setText('llmTotalTime', llm.total_response_time ?? '—');
+            setText('llmAvgTime', llm.avg_response_time ?? '—');
 
-            // Payloads
-            renderPayloads(payloads.items || []);
+            // Tasks Summary
+            const tasks = prog.tasks_summary || {};
+            setText('reconDone', tasks.recon_done ?? '0');
+            setText('reconTotal', tasks.recon_total ?? '0');
+            setText('asyncDone', tasks.async_done ?? '0');
+            setText('asyncTotal', tasks.async_total ?? '0');
 
-            // Tasks from footprints (recent activity)
-            renderTasks(footprintsData.footprints || []);
+            // Payloads and running tasks removed from explicit render, handled in Workflow Graph
+            renderWorkflowGraph(prog, payloads.items || [], footprintsData.footprints || []);
 
-            // Auto-generate log entry removed, rendering LLM logs instead
+            // LLM Logs
             const now = new Date().toLocaleTimeString('zh-CN', { hour12: false });
             setText('lastUpdate', now);
             renderLLMLogs(logsRes.logs || []);
         }
 
-        function renderPayloads(items) {
-            const list = document.getElementById('payloadList');
-            setText('payloadCount', items.length);
+        function renderWorkflowGraph(prog, payloadItems, footprints) {
+            const list = document.getElementById('workflowList');
+            let allTasks = [];
 
-            if (!items.length) {
-                list.innerHTML = '<div class="empty-state">暂无待审批 Payload</div>';
+            footprints.forEach(f => {
+                let phase = 'RECON';
+                if (f.type === 'exploit_task' || f.type === 'payload' || ['sqlmap', 'nuclei'].includes(f.tool)) phase = 'EXPLOIT';
+                if (f.type === 'privesc') phase = 'PRIVESC';
+                if (f.type === 'lateral') phase = 'LATERAL';
+                if (f.type === 'persist') phase = 'PERSIST';
+                if (f.type === 'report') phase = 'REPORT';
+                allTasks.push({
+                    id: f.id, phase: phase, tool: f.tool || f.type || 'Task', target: f.target || '', status: f.status || 'DONE'
+                });
+            });
+
+            (prog.all_tasks_list || prog.pending_tasks_list || []).forEach(t => {
+                let phase = 'RECON';
+                if (t.type === '异步' || t.tool === 'nuclei' || t.tool === 'sqlmap') phase = 'EXPLOIT';
+                allTasks.push({
+                    id: t.id, phase: phase, tool: t.tool || 'Task', target: t.target || '', status: t.status || 'DONE', ts: t.created_at || 0
+                });
+            });
+
+            payloadItems.forEach(p => {
+                allTasks.push({
+                    id: p.id, phase: 'EXPLOIT', tool: p.technique || 'Payload', target: p.target || '', status: p.status || 'PENDING', ts: p.created_at || 0
+                });
+            });
+
+            // Sort all tasks by time (newest first)
+            allTasks.sort((a,b) => (b.ts || 0) - (a.ts || 0));
+
+            // Deduplicate by ID just in case footprints and all_tasks_list overlap (they shouldn't normally, but safe is safe)
+            const seenIds = new Set();
+            allTasks = allTasks.filter(t => {
+                if (t.id && seenIds.has(t.id)) return false;
+                if (t.id) seenIds.add(t.id);
+                return true;
+            });
+
+            setText('workflowCount', allTasks.length);
+
+            if (allTasks.length === 0) {
+                list.innerHTML = '<div class="empty-state">等待任务流生成...</div>';
                 return;
             }
 
-            list.innerHTML = items.slice(0, 20).map(p => ` <div class="payload-row" > <span class="payload-id" >${(p.id || '').slice(0, 6)
+            let html = '';
+            const activePhase = (prog.current_goal || 'IDLE').toUpperCase();
+
+            PHASES.forEach((phase, index) => {
+                const phaseTasks = allTasks.filter(t => t.phase === phase);
+                const isActive = activePhase === phase;
+
+                if (phaseTasks.length === 0 && !isActive && PHASES.indexOf(activePhase) < index) {
+                    return; // skip future empty phases
                 }
 
-        …</span> <span class="payload-tech" >${p.technique || '—'
+                html += `
+                <div class="wf-phase">
+                    <div class="wf-phase-title ${isActive ? 'active' : ''}">${phase}</div>
+                    <div class="wf-nodes">
+                `;
+
+                if (phaseTasks.length === 0 && isActive) {
+                    html += `<div class="wf-node pending" style="opacity:0.5; border-style:dashed;">等待调度...</div>`;
+                } else {
+                    phaseTasks.forEach(t => {
+                        const s = t.status.toLowerCase();
+                        let statusClass = 'done';
+                        if (s === 'running') statusClass = 'running';
+                        else if (s === 'pending' || s === 'requires_approval') statusClass = 'pending';
+                        else if (s === 'failed' || s === 'timeout' || s === 'abandoned') statusClass = 'failed';
+
+                        html += `
+                        <div class="wf-node ${statusClass}">
+                            <span style="font-weight:bold;">${(t.tool || '').slice(0, 15)}</span>
+                            <span style="font-size:9px; color:var(--text-dim); margin-top:4px;">${(t.target || '').slice(0, 20)}</span>
+                        </div>
+                        `;
+                    });
                 }
 
-        </span> <span class="payload-verdict verdict-PENDING" >待审批</span> <span class="payload-result" >${p.target || ''
+                html += `
+                    </div>
+                </div>
+                `;
+
+                if (index < PHASES.length - 1 && (PHASES.indexOf(activePhase) >= index || phaseTasks.length > 0)) {
+                    html += `<div class="wf-arrow"></div>`;
                 }
+            });
 
-        </span> </div> `).join('');
-        }
-
-        function renderTasks(footprints) {
-            const list = document.getElementById('taskList');
-            const recent = footprints.slice(-15).reverse();
-            setText('taskCount', footprints.length);
-
-            if (!recent.length) {
-                list.innerHTML = '<div class="empty-state">暂无 Footprint 记录</div>';
-                return;
-            }
-
-            list.innerHTML = recent.map(f => ` <div class="task-row" > <span class="task-tool" >${(f.tool || f.type || '—').slice(0, 12)
-                }
-
-        </span> <span class="task-target" >${f.target || '—'
-                }
-
-        </span> <span class="task-status ${f.cleaned ? 'done' : 'running'}" >${f.cleaned ? 'DONE' : 'ACTIVE'
-                }
-
-        </span> </div> `).join('');
+            list.innerHTML = html;
         }
 
         // ── LLM LOGS ──────────────────────────────────────────────
@@ -1203,21 +1414,21 @@
             // The latest logs from Redis are at the end, so we reverse it to show newest at bottom or top?
             // Actually, for a terminal style, if we append, newest is at bottom.
             // Let's render in chronological order (newest at bottom) and auto-scroll.
-            
+
             // Wait, previously addLog did unshift (newest at top). Let's keep newest at top for visibility.
             const reversedLogs = [...logs].reverse();
 
             list.innerHTML = reversedLogs.map(e => `
                 <div class="log-entry">
-                    <span class="log-time">${new Date(e.timestamp).toLocaleTimeString('zh-CN', {hour12: false})}</span>
-                    <span class="log-agent agent-${e.agent}">${e.agent.replace('Agent', '')}</span>
-                    <span class="log-text">${escapeHTML(e.text)}</span>
+                    <span class="log-time">${new Date(e.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}</span>
+                    <span class="log-agent agent-${(e.agent || '').toLowerCase()}">${(e.agent || '').replace('Agent', '').toUpperCase()}</span>
+                    <span class="log-card">${escapeHTML(e.text).replace(/\\n/g, '<br/>')}</span>
                 </div>
             `).join('');
         }
 
         function escapeHTML(str) {
-            return str.replace(/[&<>'"]/g, 
+            return str.replace(/[&<>'"]/g,
                 tag => ({
                     '&': '&amp;',
                     '<': '&lt;',
