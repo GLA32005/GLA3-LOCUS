@@ -15,6 +15,7 @@ FastAPI 入口 — Human 审批接口
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -30,12 +31,25 @@ logger = logging.getLogger(__name__)
 
 # ── 鉴权 ──────────────────────────────────────────────────────
 
-_API_KEY         = os.environ.get("API_KEY", "changeme")
+_API_KEY = os.environ.get("API_KEY", "")
+if not _API_KEY:
+    # P0-3 修复：不允许空/默认 API Key，强制通过环境变量设置
+    logger.critical(
+        "❗ 环境变量 API_KEY 未设置！API 鉴权将拒绝所有请求。"
+        "请在 .env 或环境变量中设置 API_KEY。"
+    )
+
 _api_key_header  = APIKeyHeader(name="X-API-Key", auto_error=True)
 
 
 async def _require_key(api_key: str = Security(_api_key_header)) -> str:
-    if api_key != _API_KEY:
+    if not _API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="API_KEY not configured on server",
+        )
+    # P0-3 修复：使用常量时间比较防止时序侧信道攻击
+    if not hmac.compare_digest(api_key.encode(), _API_KEY.encode()):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid API key",
@@ -87,12 +101,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# P0-3 修复：CORS 从 "*" 收紧为可配置白名单，默认仅允许本地
+_CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o.strip() for o in _CORS_ORIGINS if o.strip()],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-API-Key", "Content-Type"],
 )
 
 

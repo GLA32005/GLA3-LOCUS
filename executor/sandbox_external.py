@@ -25,24 +25,8 @@ _MEM_LIMIT       = "256m"
 _TIMEOUT_S       = 30
 _NETWORK_MODE    = "none"       # 完全断网（外部沙箱不需要访问目标）
 
-# 破坏性指令的静态模式匹配（Critic 已做一轮，这里是最后防线）
-_DESTRUCTIVE_PATTERNS = (
-    "rm -rf /",
-    "rm -rf /*",
-    "mkfs",
-    "drop database",
-    "drop table",
-    "format c:",
-    "del /f /s /q c:\\",
-    "> /dev/sda",
-    "dd if=/dev/zero of=/dev/",
-    "shutdown",
-    "halt",
-    "poweroff",
-    "reboot",
-    "init 0",
-    "init 6",
-)
+# P0-1 修复：破坏性检测迁移至共享模块，增强混淆检测能力
+from core.safety import check_destructive
 
 # executor_hint → 容器内执行命令
 _EXEC_CMD: dict[str, list[str]] = {
@@ -94,15 +78,14 @@ class ExternalSandbox:
         对 payload 进行沙箱检查。
         先做静态模式匹配（快速），再做 Docker 语法执行（慢但准确）。
         """
-        # ── 静态检查（不需要 Docker）──────────────────────────
-        content_lower = content.lower()
-        for pattern in _DESTRUCTIVE_PATTERNS:
-            if pattern in content_lower:
-                logger.warning(f"ExternalSandbox: 静态拦截 '{pattern}'")
-                return SandboxResult(
-                    passed=False,
-                    reason=f"destructive_pattern: {pattern}"
-                )
+        # ── P0-1 修复：多层规范化静态检查（不需要 Docker）──────
+        is_destructive, detail = check_destructive(content)
+        if is_destructive:
+            logger.warning(f"ExternalSandbox: 多层检测拦截: {detail}")
+            return SandboxResult(
+                passed=False,
+                reason=detail,
+            )
 
         if not content.strip():
             return SandboxResult(passed=False, reason="empty_payload")

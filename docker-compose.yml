@@ -7,11 +7,12 @@ services:
   # ── Redis（动态状态存储）────────────────────────────────
   redis:
     image: redis:7-alpine
+    # P0-3 修复：端口绑定 127.0.0.1，仅允许本机访问
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -21,16 +22,17 @@ services:
   # ── Neo4j（资产图谱）───────────────────────────────────
   neo4j:
     image: neo4j:5-community
+    # P0-3 修复：端口绑定 127.0.0.1，密码环境变量化
     ports:
-      - "7474:7474"   # Browser UI
-      - "7687:7687"   # Bolt
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
     environment:
-      NEO4J_AUTH: neo4j/password
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-password}
       NEO4J_PLUGINS: '["apoc"]'
     volumes:
       - neo4j_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN 1'"]
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p $$NEO4J_AUTH_PASSWORD 'RETURN 1' || cypher-shell -u neo4j -p password 'RETURN 1'"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -38,9 +40,10 @@ services:
   # ── ClickHouse（审计日志）───────────────────────────────
   clickhouse:
     image: clickhouse/clickhouse-server:24-alpine
+    # P0-3 修复：端口绑定 127.0.0.1
     ports:
-      - "8123:8123"   # HTTP
-      - "9000:9000"   # Native
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./config/db_init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -65,7 +68,7 @@ services:
       REDIS_URL: redis://redis:6379
       NEO4J_URL: bolt://neo4j:7687
       NEO4J_USER: neo4j
-      NEO4J_PASSWORD: password
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-password}
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: 9000
       CLICKHOUSE_DB: pentest

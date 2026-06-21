@@ -31,26 +31,8 @@ from core.protocols import (
 
 logger = logging.getLogger(__name__)
 
-# ── 硬编码危险模式（case-insensitive 子串匹配）────────────────
-
-_DOS_PATTERNS: tuple[str, ...] = (
-    "rm -rf /",
-    "rm -rf /*",
-    "mkfs",
-    "drop database",
-    "drop table",
-    "format c:",
-    "del /f /s /q c:\\",
-    "del /f /s /q /",
-    "shutdown",
-    "halt",
-    "poweroff",
-    "reboot",
-    "init 0",
-    "init 6",
-    "> /dev/sda",
-    "dd if=/dev/zero of=/dev/",
-)
+# P0-1 修复：危险模式检测迁移至共享模块，增强混淆检测能力
+from core.safety import check_destructive
 
 # ── 评分阈值 ─────────────────────────────────────────────────
 
@@ -219,12 +201,11 @@ class CriticAgent(BaseAgent):
         if not content or len(content.strip()) < 5:
             return True, RejectReason.SYNTAX_ERROR
 
-        # 危险命令模式匹配
-        content_lower = content.lower()
-        for pattern in _DOS_PATTERNS:
-            if pattern in content_lower:
-                logger.warning(f"硬编码拦截: 命中危险模式 '{pattern}'")
-                return True, RejectReason.DOS_RISK
+        # P0-1 修复：多层规范化危险模式检测（替代原来的 naive 子串匹配）
+        is_destructive, detail = check_destructive(content)
+        if is_destructive:
+            logger.warning(f"硬编码拦截: {detail}")
+            return True, RejectReason.DOS_RISK
 
         # OUT_OF_SCOPE
         if scope:

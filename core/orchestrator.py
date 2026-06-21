@@ -737,19 +737,15 @@ class Orchestrator:
                 await self.event_bus.publish(opp_event)
 
     async def _handle_opportunity_found(self, event: Event):
-        """机会主义跳转：立即更新 focus，强制 Think"""
+        """机会主义跳转：原子更新 focus，强制 Think"""
         p = event.payload
-        focus = await self.state_api.get_focus()
-        focus["opportunity_flag"]  = True
-        focus["opportunity_target"] = p["target"]
-        focus["opportunity_reason"] = p["reason"]
-
-        mutation = StateMutation(
-            operation=MutationOperation.WRITE,
-            domain=StateDomain.FOCUS,
-            payload=focus
-        )
-        await self.state_api.apply_mutation(mutation)
+        # P0-2 修复：使用 update_focus_atomic 原子合并，而非 read-modify-write + redis.set 全量覆写
+        # 原实现会静默吞噬并发的 stall_count/current_goal 更新
+        await self.state_api.update_focus_atomic({
+            "opportunity_flag":   True,
+            "opportunity_target": p["target"],
+            "opportunity_reason": p["reason"],
+        })
         asyncio.create_task(self._trigger_think(force=True))
 
     async def _handle_exploit_success(self, event: Event):
