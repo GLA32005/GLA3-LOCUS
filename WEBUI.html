@@ -1170,21 +1170,23 @@
                 }
             });
 
-            const reconPanel = document.getElementById('taskList').closest('.panel');
-            const payloadPanel = document.getElementById('payloadList').closest('.panel');
+            const taskEl = document.getElementById('taskList');
+            const payloadEl = document.getElementById('payloadList');
+            const reconPanel = taskEl ? taskEl.closest('.panel') : null;
+            const payloadPanel = payloadEl ? payloadEl.closest('.panel') : null;
 
             if (phase === 'RECON') {
-                reconPanel.style.display = 'block';
-                payloadPanel.style.display = 'none';
+                if (reconPanel) reconPanel.style.display = 'block';
+                if (payloadPanel) payloadPanel.style.display = 'none';
             } else if (phase === 'REPORT') {
-                reconPanel.style.display = 'none';
-                payloadPanel.style.display = 'none';
+                if (reconPanel) reconPanel.style.display = 'none';
+                if (payloadPanel) payloadPanel.style.display = 'none';
             } else {
-                reconPanel.style.display = 'none';
-                payloadPanel.style.display = 'block';
+                if (reconPanel) reconPanel.style.display = 'none';
+                if (payloadPanel) payloadPanel.style.display = 'block';
             }
 
-            renderLogs();
+
         }
 
         // ── INIT ─────────────────────────────────────────────
@@ -1193,8 +1195,6 @@
             API_KEY = document.getElementById('cfgKey').value;
             if (pollTimer) clearInterval(pollTimer);
             poll();
-            pollTimer = setInterval(poll, 4000);
-
             pollTimer = setInterval(poll, 4000);
         }
 

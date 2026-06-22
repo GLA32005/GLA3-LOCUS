@@ -1,6 +1,7 @@
 # ═══════════════════════════════════════════════════════════
 # Agentic Pentest Framework — Docker Compose
-# 一键拉起完整环境：Redis + Neo4j + ClickHouse + App
+# 一键拉起基础设施：Redis + Neo4j + ClickHouse
+# App 在宿主机直接运行（需访问 Docker API 管理沙箱容器）
 # ═══════════════════════════════════════════════════════════
 
 services:
@@ -14,7 +15,7 @@ services:
       - redis_data:/data
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -32,7 +33,7 @@ services:
     volumes:
       - neo4j_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p $$NEO4J_AUTH_PASSWORD 'RETURN 1' || cypher-shell -u neo4j -p password 'RETURN 1'"]
+      test: [ "CMD-SHELL", "cypher-shell -u neo4j -p $$NEO4J_AUTH_PASSWORD 'RETURN 1' || cypher-shell -u neo4j -p password 'RETURN 1'" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -52,36 +53,10 @@ services:
       CLICKHOUSE_USER: default
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      test: [ "CMD-SHELL", "clickhouse-client --query 'SELECT 1'" ]
       interval: 5s
       timeout: 3s
       retries: 10
-
-  # ── 主应用 ─────────────────────────────────────────────
-  app:
-    build: .
-    ports:
-      - "${API_PORT:-8080}:8080"
-    env_file:
-      - .env
-    environment:
-      REDIS_URL: redis://redis:6379
-      NEO4J_URL: bolt://neo4j:7687
-      NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-password}
-      CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_PORT: 9000
-      CLICKHOUSE_DB: pentest
-    volumes:
-      - ./reports:/app/reports      # 报告输出目录
-      - ./config:/app/config:ro     # 只读挂载配置
-    depends_on:
-      redis:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-      clickhouse:
-        condition: service_healthy
 
 volumes:
   redis_data:

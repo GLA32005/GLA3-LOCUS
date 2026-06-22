@@ -102,7 +102,10 @@ app = FastAPI(
 )
 
 # P0-3 修复：CORS 从 "*" 收紧为可配置白名单，默认仅允许本地
-_CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080").split(",")
+_CORS_ORIGINS = os.environ.get(
+    "CORS_ORIGINS",
+    "http://localhost:8080,http://127.0.0.1:8080,http://localhost:8086,http://127.0.0.1:8086,null"
+).split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _CORS_ORIGINS if o.strip()],
