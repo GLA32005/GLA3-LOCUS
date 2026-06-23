@@ -5,6 +5,7 @@ Metasploit Tool — 利用框架 RPC 客户端
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Optional
@@ -60,8 +61,11 @@ class MsfTool(BaseTool):
 
         t0 = time.time()
         try:
-            client = MsfRpcClient(rpc_pass, server=rpc_host,
-                                   port=rpc_port, ssl=False)
+            # 同步 RPC 连接卸载到线程池，避免阻塞事件循环
+            client = await asyncio.to_thread(
+                MsfRpcClient, rpc_pass, server=rpc_host,
+                port=rpc_port, ssl=False
+            )
             module_type = module_path.split("/")[0]   # "exploit" / "auxiliary"
 
             if module_type == "exploit":
@@ -70,14 +74,14 @@ class MsfTool(BaseTool):
                     exploit[k] = v
                 if payload_path:
                     p = client.modules.use("payload", payload_path)
-                    result = exploit.execute(payload=p)
+                    result = await asyncio.to_thread(exploit.execute, payload=p)
                 else:
-                    result = exploit.execute()
+                    result = await asyncio.to_thread(exploit.execute)
             else:
                 mod = client.modules.use(module_type, module_path)
                 for k, v in options.items():
                     mod[k] = v
-                result = mod.execute()
+                result = await asyncio.to_thread(mod.execute)
 
             duration_ms = int((time.time() - t0) * 1000)
 
@@ -85,8 +89,8 @@ class MsfTool(BaseTool):
             job_id = result.get("job_id")
             success = job_id is not None
 
-            # 检查是否拿到 session（利用成功）
-            sessions = self._get_new_sessions(client, target, timeout)
+            # 异步轮询检查是否拿到 session（利用成功）
+            sessions = await self._get_new_sessions_async(client, target, timeout)
 
             footprint = None
             if sessions:
@@ -114,19 +118,20 @@ class MsfTool(BaseTool):
             return ToolResult(success=False, raw={}, error=str(e),
                               duration_ms=duration_ms)
 
-    def _get_new_sessions(
+    async def _get_new_sessions_async(
         self, client, target: str, wait_s: int
     ) -> list[dict]:
-        """Poll for new sessions against target, respecting wait_s up to 300s."""
-        import time as _time
+        """异步轮询 MSF sessions，使用 asyncio.sleep 避免阻塞事件循环。"""
         ip = target.split(":")[0]
-        # Cap at 300s to protect the event loop from indefinite blocking,
+        # Cap at 300s to protect against indefinite waiting,
         # but always honour the caller's timeout if smaller.
-        deadline = _time.time() + min(wait_s, 300)
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + min(wait_s, 300)
         poll_interval = 2
-        while _time.time() < deadline:
+        while loop.time() < deadline:
             try:
-                sessions = client.sessions.list
+                # 同步 RPC 查询卸载到线程池
+                sessions = await asyncio.to_thread(lambda: client.sessions.list)
                 new = [
                     {"id": sid, "info": info}
                     for sid, info in sessions.items()
@@ -136,6 +141,6 @@ class MsfTool(BaseTool):
                     return new
             except Exception:
                 pass
-            remaining = deadline - _time.time()
-            _time.sleep(min(poll_interval, max(remaining, 0)))
+            remaining = deadline - loop.time()
+            await asyncio.sleep(min(poll_interval, max(remaining, 0)))
         return []

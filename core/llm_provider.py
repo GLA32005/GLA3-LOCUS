@@ -58,24 +58,28 @@ ESCALATION_CONFIG = {
         "garbage_threshold": 0.3,  # 低于此分直接丢弃，不升级
         "max_local_retries": 0,
         "escalate_on_parse_fail": True,
+        "budget_share": 0.25,      # 总预算的 25%
     },
     "exploit": {
         "threshold": 0.7,
         "garbage_threshold": 0.3,
         "max_local_retries": 0,
         "escalate_on_parse_fail": True,
+        "budget_share": 0.35,      # 高风险决策角色，分配最多
     },
     "recon": {
         "threshold": 0.5,
         "garbage_threshold": 0.2,
         "max_local_retries": 0,
         "escalate_on_parse_fail": False,
+        "budget_share": 0.25,
     },
     "critic": {
         "threshold": 0.0,          # Critic 有硬编码规则兜底，不需要升级
         "garbage_threshold": 0.0,
         "max_local_retries": 0,
         "escalate_on_parse_fail": False,
+        "budget_share": 0.15,      # 最低频，剩余配额可被其他角色借用
     },
 }
 
@@ -84,22 +88,86 @@ ESCALATION_CONFIG = {
 
 _local_calls: int = 0
 _escalation_counts: dict[str, int] = {}
-_strong_budget = int(ConfigManager().get_all().get("llm", {}).get("strong_budget", 20))
-_strong_budget_used: int = 0
+_strong_budget_total = int(ConfigManager().get_all().get("llm", {}).get("strong_budget", 20))
+_strong_budget_by_role: dict[str, int] = {}   # 每角色已用次数
+_strong_budget_limits: dict[str, int] = {}    # 每角色上限（启动时初始化）
 _total_tokens: int = 0
 _total_tokens_base: int = 0
 _total_tokens_strong: int = 0
 _total_duration: float = 0.0
 _successful_calls: int = 0
 
+
+def _init_role_budgets():
+    """根据 ESCALATION_CONFIG 的 budget_share 初始化各角色预算上限"""
+    global _strong_budget_limits
+    total = _strong_budget_total
+    allocated = 0
+    roles = list(ESCALATION_CONFIG.keys())
+    for role in roles[:-1]:  # 除最后一个角色外
+        share = ESCALATION_CONFIG[role].get("budget_share", 1.0 / len(roles))
+        limit = max(1, int(total * share))  # 至少 1 次
+        _strong_budget_limits[role] = limit
+        allocated += limit
+    # 最后一个角色拿剩余的，避免舍入误差
+    _strong_budget_limits[roles[-1]] = max(1, total - allocated)
+
+
+def _get_role_remaining(role: str) -> int:
+    """获取某角色剩余预算（含溢出借用）"""
+    own_limit = _strong_budget_limits.get(role, 0)
+    own_used = _strong_budget_by_role.get(role, 0)
+    own_remaining = own_limit - own_used
+    if own_remaining > 0:
+        return own_remaining
+    # 溢出借用：尝试借用 critic 的剩余配额（critic 最不易触发升级）
+    if role != "critic":
+        critic_limit = _strong_budget_limits.get("critic", 0)
+        critic_used = _strong_budget_by_role.get("critic", 0)
+        critic_remaining = critic_limit - critic_used
+        if critic_remaining > 0:
+            return 1  # 允许借用 1 次
+    return 0
+
+
+def _consume_role_budget(role: str) -> bool:
+    """消费一次角色预算，返回是否成功"""
+    global _strong_budget_by_role
+    own_limit = _strong_budget_limits.get(role, 0)
+    own_used = _strong_budget_by_role.get(role, 0)
+    if own_used < own_limit:
+        _strong_budget_by_role[role] = own_used + 1
+        return True
+    # 溢出借用 critic 配额
+    if role != "critic":
+        critic_limit = _strong_budget_limits.get("critic", 0)
+        critic_used = _strong_budget_by_role.get("critic", 0)
+        if critic_used < critic_limit:
+            _strong_budget_by_role["critic"] = critic_used + 1
+            logger.info(f"[{role}] 自身预算已用完，借用 critic 配额")
+            return True
+    return False
+
+
+# 模块加载时初始化角色预算
+_init_role_budgets()
+
 def get_llm_stats() -> dict:
     """供 /progress API 暴露统计"""
+    total_strong_used = sum(_strong_budget_by_role.values())
     total = _local_calls + sum(_escalation_counts.values())
+    # 按角色的预算使用情况
+    budget_detail = {}
+    for role in ESCALATION_CONFIG:
+        used = _strong_budget_by_role.get(role, 0)
+        limit = _strong_budget_limits.get(role, 0)
+        budget_detail[role] = f"{used}/{limit}"
     return {
         "local_calls": _local_calls,
         "escalations": dict(_escalation_counts),
-        "strong_upgrades": _strong_budget_used,
-        "strong_budget": f"{_strong_budget - _strong_budget_used}/{_strong_budget}",
+        "strong_upgrades": total_strong_used,
+        "strong_budget": f"{_strong_budget_total - total_strong_used}/{_strong_budget_total}",
+        "strong_budget_by_role": budget_detail,
         "escalation_rate": f"{sum(_escalation_counts.values()) / max(total, 1) * 100:.1f}%",
         "total_tokens": _total_tokens,
         "total_tokens_base": _total_tokens_base,
@@ -111,15 +179,16 @@ def get_llm_stats() -> dict:
 
 def reset_llm_stats():
     """每次新任务重置统计"""
-    global _local_calls, _escalation_counts, _strong_budget_used, _total_tokens, _total_tokens_base, _total_tokens_strong, _total_duration, _successful_calls
+    global _local_calls, _escalation_counts, _strong_budget_by_role, _total_tokens, _total_tokens_base, _total_tokens_strong, _total_duration, _successful_calls
     _local_calls = 0
     _escalation_counts = {}
-    _strong_budget_used = 0
+    _strong_budget_by_role = {}
     _total_tokens = 0
     _total_tokens_base = 0
     _total_tokens_strong = 0
     _total_duration = 0.0
     _successful_calls = 0
+    _init_role_budgets()  # 重新初始化角色预算上限
 
 
 # ── API 格式检测 ──────────────────────────────────────────────
@@ -152,19 +221,21 @@ async def call_llm(
     单次 LLM 调用。
     返回 (response_text, tokens_used, was_escalated)
     """
-    global _local_calls, _strong_budget_used, _total_tokens, _total_tokens_base, _total_tokens_strong
+    global _local_calls, _total_tokens, _total_tokens_base, _total_tokens_strong
 
     if force_strong and _is_strong_available():
-        if _strong_budget_used < _strong_budget:
-            _strong_budget_used += 1
+        if _get_role_remaining(agent_role) > 0:
+            _consume_role_budget(agent_role)
             _escalation_counts[agent_role] = _escalation_counts.get(agent_role, 0) + 1
             local_cfg = _get_local_config()
             strong_cfg = _get_strong_config()
+            role_used = _strong_budget_by_role.get(agent_role, 0)
+            role_limit = _strong_budget_limits.get(agent_role, 0)
             logger.warning(
                 f"[{agent_role}] 🔼 强制切换到大模型 | "
                 f"模型: {local_cfg['model']} → {strong_cfg['model']} | "
                 f"累计升级: {_escalation_counts[agent_role]} 次 "
-                f"(预算 {_strong_budget_used}/{_strong_budget})"
+                f"(角色预算 {role_used}/{role_limit})"
             )
             text, tokens = await _call_single(system, prompt, strong_cfg, max_tokens)
             _total_tokens += tokens
@@ -181,9 +252,11 @@ async def call_llm(
                 )
             return text, tokens, True
         else:
+            role_used = _strong_budget_by_role.get(agent_role, 0)
+            role_limit = _strong_budget_limits.get(agent_role, 0)
             logger.warning(
-                f"[{agent_role}] 需要强制升级，但大模型预算已用完 "
-                f"({_strong_budget_used}/{_strong_budget})，回退本地"
+                f"[{agent_role}] 需要强制升级，但角色预算已用完 "
+                f"({role_used}/{role_limit})，回退本地"
             )
 
     _local_calls += 1
@@ -208,7 +281,7 @@ async def call_llm_with_escalation(
     2. 解析失败 or 置信度不足 → 升级大模型
     返回 (response_text, tokens_used, was_escalated)
     """
-    global _local_calls, _strong_budget_used, _total_tokens, _total_tokens_base, _total_tokens_strong
+    global _local_calls, _total_tokens, _total_tokens_base, _total_tokens_strong
 
     # 外部强制升级（如 stall 触发、新资产发现）
     if force_strong:
@@ -266,16 +339,18 @@ async def call_llm_with_escalation(
         should_escalate = True
 
     # ── 升级到大模型 ──
-    if should_escalate and _is_strong_available() and _strong_budget_used < _strong_budget:
-        _strong_budget_used += 1
+    if should_escalate and _is_strong_available() and _get_role_remaining(agent_role) > 0:
+        _consume_role_budget(agent_role)
         _escalation_counts[agent_role] = _escalation_counts.get(agent_role, 0) + 1
         strong_cfg = _get_strong_config()
+        role_used = _strong_budget_by_role.get(agent_role, 0)
+        role_limit = _strong_budget_limits.get(agent_role, 0)
         logger.warning(
             f"[{agent_role}] 🔼 本地模型能力不足，切换到大模型 | "
             f"原因: {escalate_reason} | "
             f"模型: {_get_local_config()['model']} → {strong_cfg['model']} | "
             f"累计升级: {_escalation_counts[agent_role]} 次 "
-            f"(预算 {_strong_budget_used}/{_strong_budget})"
+            f"(角色预算 {role_used}/{role_limit})"
         )
         text, tokens = await _call_single(system, prompt, strong_cfg, max_tokens)
         _total_tokens += tokens
@@ -299,9 +374,11 @@ async def call_llm_with_escalation(
                 f"但 STRONG 模型未配置，降级使用本地结果"
             )
         else:
+            role_used = _strong_budget_by_role.get(agent_role, 0)
+            role_limit = _strong_budget_limits.get(agent_role, 0)
             logger.warning(
                 f"[{agent_role}] ⚠️ 本地模型能力不足({escalate_reason})，"
-                f"但大模型预算已用完 ({_strong_budget_used}/{_strong_budget})，降级使用本地结果"
+                f"但角色预算已用完 ({role_used}/{role_limit})，降级使用本地结果"
             )
 
     return last_text, last_tokens, False
